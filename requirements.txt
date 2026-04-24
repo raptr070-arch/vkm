@@ -1,0 +1,11 @@
+aiogram==3.13.*
+shazamio
+yt-dlp
+pydub
+python-dotenv
+aiofiles
+# Chrome dan cookie olish
+yt-dlp --cookies-from-browser chrome --cookies cookies.txt
+
+# Yoki Firefox dan
+yt-dlp --cookies-from-browser firefox --cookies cookies.txt
