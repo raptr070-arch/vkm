@@ -18,3 +18,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 CMD ["python", "boot.py"]
+# Dockerfile ga qo'shing
+RUN pip install --upgrade yt-dlp
