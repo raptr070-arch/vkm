@@ -66,7 +66,7 @@ Config.TEMP_PATH.mkdir(exist_ok=True)
 # ffmpeg ni tekshirish
 def check_ffmpeg():
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
         return True
     except:
         return False
@@ -213,6 +213,7 @@ async def download_video(url: str, user_id: int):
                 'retries': 2,
                 'socket_timeout': 30,
                 'merge_output_format': 'mp4',
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -235,27 +236,6 @@ async def download_video(url: str, user_id: int):
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
 # =================== MP3 YUKLASH ===================
-# Cookies faylini yuklash
-def load_cookies():
-    try:
-        with open('cookies.txt', 'r') as f:
-            return json.load(f)
-    except:
-        return None
-
-COOKIES = load_cookies()
-
-# download_video funksiyasidagi opts ga qo'shing:
-opts = {
-    'outtmpl': str(Config.DOWNLOADS_PATH / f"video_{user_id}_{int(time.time())}.%(ext)s"),
-    'format': 'best[height<=480][ext=mp4]/best[ext=mp4]',
-    'quiet': True,
-    'no_warnings': True,
-    'retries': 2,
-    'socket_timeout': 30,
-    'merge_output_format': 'mp4',
-    'cookiefile': 'cookies.txt',  # QO'SHING
-}
 async def download_mp3(url: str, user_id: int):
     def run():
         try:
@@ -271,6 +251,7 @@ async def download_mp3(url: str, user_id: int):
                 'no_warnings': True,
                 'retries': 2,
                 'socket_timeout': 30,
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -615,7 +596,7 @@ async def keep_alive_server():
     """Bot uxlamasligi uchun HTTP server"""
     async def handle_client(reader, writer):
         try:
-            data = await reader.read(1024)
+            await reader.read(1024)
             response = (
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
@@ -666,7 +647,6 @@ async def errors_handler(update, exception):
 async def on_startup():
     """Bot ishga tushganda bajariladigan amallar"""
     print("🚀 Bot ishga tushmoqda...")
-    # Webhook ni tozalash - CONFLICT xatosini hal qiladi
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Webhook tozalandi")
 
@@ -680,7 +660,6 @@ async def main():
     
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    # Startup funksiyasini ishga tushirish
     await on_startup()
     
     bot_info = await bot.get_me()
@@ -692,11 +671,9 @@ async def main():
     print(f"🟢 Keep-Alive: PORT {Config.KEEP_ALIVE_PORT}")
     print("=" * 60)
     
-    # Keep-alive server va self-ping
     asyncio.create_task(keep_alive_server())
     asyncio.create_task(self_ping())
     
-    # Botni ishga tushirish
     print("🚀 Bot polling boshlandi...")
     
     try:
