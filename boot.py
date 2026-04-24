@@ -26,13 +26,6 @@ import yt_dlp
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import aiohttp
-import nest_asyncio
-
-# nest_asyncio - Render uchun
-try:
-    nest_asyncio.apply()
-except:
-    pass
 
 # ShazamIO
 try:
@@ -46,7 +39,7 @@ load_dotenv()
 
 class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
-    DOWNLOADS_PATH = Path("/tmp/downloads")  # Render'da /tmp ishlatiladi
+    DOWNLOADS_PATH = Path("/tmp/downloads")
     TEMP_PATH = Path("/tmp/temp_audio")
     MAX_FILE_SIZE = 50 * 1024 * 1024
     AUDIO_SAMPLE_DURATION = 15
@@ -70,10 +63,10 @@ class SongData:
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True)
 Config.TEMP_PATH.mkdir(exist_ok=True)
 
-# ffmpeg ni tekshirish (Render'da ffmpeg o'rnatilgan)
+# ffmpeg ni tekshirish
 def check_ffmpeg():
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
         return True
     except:
         return False
@@ -89,7 +82,7 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
-pool = ThreadPoolExecutor(max_workers=2)  # Render uchun kamroq worker
+pool = ThreadPoolExecutor(max_workers=2)
 
 temp_data: Dict[str, SongData] = {}
 video_cache: Dict[str, dict] = {}
@@ -126,9 +119,6 @@ def format_size(bytes_size: int) -> str:
             return f"{bytes_size:.1f} {unit}"
         bytes_size /= 1024
     return f"{bytes_size:.1f} TB"
-
-def clean_filename(filename: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]', '', filename)[:80]
 
 def extract_artist_title(full_title: str):
     if not full_title:
@@ -188,7 +178,7 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
             '-y'
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if not os.path.exists(audio_path):
             return None
@@ -217,7 +207,7 @@ async def download_video(url: str, user_id: int):
         try:
             opts = {
                 'outtmpl': str(Config.DOWNLOADS_PATH / f"video_{user_id}_{int(time.time())}.%(ext)s"),
-                'format': 'best[height<=480][ext=mp4]/best[ext=mp4]',  # 480p yaxshiroq Render uchun
+                'format': 'best[height<=480][ext=mp4]/best[ext=mp4]',
                 'quiet': True,
                 'no_warnings': True,
                 'retries': 2,
@@ -254,7 +244,7 @@ async def download_mp3(url: str, user_id: int):
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
-                    'preferredquality': '128',  # 128 kbps Render uchun
+                    'preferredquality': '128',
                 }],
                 'quiet': True,
                 'no_warnings': True,
@@ -272,7 +262,7 @@ async def download_mp3(url: str, user_id: int):
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
 # =================== QO'SHIQ QIDIRISH ===================
-async def search_songs(query: str, limit: int = 5) -> List[dict]:  # Kamaytirildi Render uchun
+async def search_songs(query: str, limit: int = 5) -> List[dict]:
     def run():
         try:
             opts = {
@@ -305,7 +295,7 @@ async def search_songs(query: str, limit: int = 5) -> List[dict]:  # Kamaytirild
     
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
-# =================== START ===================
+# =================== BUYRUQLAR ===================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -514,8 +504,6 @@ async def similar_songs(call: CallbackQuery):
     
     if video_info.get('identified_song'):
         search_query = video_info['identified_song']['full_title']
-        artist = video_info['identified_song'].get('artist', '')
-        song_title = video_info['identified_song'].get('title', '')
     else:
         artist = video_info.get('artist', '')
         song_title = video_info.get('clean_title', '')
@@ -529,14 +517,6 @@ async def similar_songs(call: CallbackQuery):
     if search_query:
         songs1 = await search_songs(search_query, limit=5)
         for s in songs1:
-            if s['url'] not in seen_urls:
-                all_songs.append(s)
-                seen_urls.add(s['url'])
-    
-    if song_title and len(all_songs) < 5:
-        cover_query = f"{song_title} cover"
-        songs2 = await search_songs(cover_query, limit=3)
-        for s in songs2:
             if s['url'] not in seen_urls:
                 all_songs.append(s)
                 seen_urls.add(s['url'])
@@ -615,8 +595,6 @@ async def keep_alive_server():
     async def handle_client(reader, writer):
         try:
             data = await reader.read(1024)
-            request = data.decode('utf-8', errors='ignore')
-            
             response = (
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
@@ -624,7 +602,6 @@ async def keep_alive_server():
                 "Connection: close\r\n\r\n"
                 '{"status":"alive","bot":"MP3kuylabot","uptime":"' + str(int(time.time())) + '"}'
             )
-            
             writer.write(response.encode())
             await writer.drain()
         except:
@@ -664,11 +641,26 @@ async def errors_handler(update, exception):
         logging.error(f"Xatolik: {exception}")
     return True
 
-# =================== MAIN ===================
+# =================== ASOSIY FUNKSIYA ===================
+async def on_startup():
+    """Bot ishga tushganda bajariladigan amallar"""
+    print("🚀 Bot ishga tushmoqda...")
+    # Webhook ni tozalash - CONFLICT xatosini hal qiladi
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Webhook tozalandi")
+
+async def on_shutdown():
+    """Bot to'xtaganda bajariladigan amallar"""
+    print("⏹️ Bot to'xtatilmoqda...")
+    await bot.session.close()
+
 async def main():
     global bot_running
     
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Startup funksiyasini ishga tushirish
+    await on_startup()
     
     bot_info = await bot.get_me()
     
@@ -685,7 +677,14 @@ async def main():
     
     # Botni ishga tushirish
     print("🚀 Bot polling boshlandi...")
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"❌ Polling xatosi: {e}")
+        await asyncio.sleep(5)
+    finally:
+        await on_shutdown()
 
 def signal_handler(sig, frame):
     global bot_running
