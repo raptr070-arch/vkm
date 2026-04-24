@@ -1,6 +1,6 @@
-aiogram==3.13.*
-shazamio
+aiogram==3.10.0
 yt-dlp
-pydub
 python-dotenv
-aiofiles
+aiohttp
+nest-asyncio
+shazamio
