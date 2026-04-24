@@ -235,6 +235,27 @@ async def download_video(url: str, user_id: int):
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
 # =================== MP3 YUKLASH ===================
+# Cookies faylini yuklash
+def load_cookies():
+    try:
+        with open('cookies.txt', 'r') as f:
+            return json.load(f)
+    except:
+        return None
+
+COOKIES = load_cookies()
+
+# download_video funksiyasidagi opts ga qo'shing:
+opts = {
+    'outtmpl': str(Config.DOWNLOADS_PATH / f"video_{user_id}_{int(time.time())}.%(ext)s"),
+    'format': 'best[height<=480][ext=mp4]/best[ext=mp4]',
+    'quiet': True,
+    'no_warnings': True,
+    'retries': 2,
+    'socket_timeout': 30,
+    'merge_output_format': 'mp4',
+    'cookiefile': 'cookies.txt',  # QO'SHING
+}
 async def download_mp3(url: str, user_id: int):
     def run():
         try:
