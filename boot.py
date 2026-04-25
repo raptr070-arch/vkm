@@ -7,10 +7,8 @@ import subprocess
 import signal
 import sys
 import json
-import pickle
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
-from dataclasses import dataclass, asdict
 from pathlib import Path
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
@@ -32,30 +30,27 @@ import aiohttp
 try:
     from shazamio import Shazam
     SHAZAM_AVAILABLE = True
+    print("✅ Shazamio o‘rnatilgan!")
 except ImportError:
     SHAZAM_AVAILABLE = False
+    print("⚠️ Shazamio o‘rnatilmagan! Audio aniqlash ishlamaydi.")
 
-# =================== KONFIGURATSIYA ===================
+# =================== KONFIG ===================
 load_dotenv()
 
 class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     DOWNLOADS_PATH = Path("/tmp/downloads")
     TEMP_PATH = Path("/tmp/temp_audio")
-    CACHE_PATH = Path("/tmp/cache")  # Ma'lumotlarni saqlash uchun
     MAX_FILE_SIZE = 50 * 1024 * 1024
     AUDIO_SAMPLE_DURATION = 15
     KEEP_ALIVE_PORT = int(os.getenv("PORT", "8080"))
-    PING_INTERVAL = 300
-    CACHE_TTL = 86400  # 24 soat (ma'lumotlar 1 kun saqlanadi)
 
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
 
-# Papkalar
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True)
 Config.TEMP_PATH.mkdir(exist_ok=True)
-Config.CACHE_PATH.mkdir(exist_ok=True)
 
 # =================== FFMPEG ===================
 def check_ffmpeg():
@@ -66,109 +61,22 @@ def check_ffmpeg():
         return False
 
 FFMPEG_AVAILABLE = check_ffmpeg()
+if not FFMPEG_AVAILABLE:
+    print("⚠️ FFmpeg topilmadi! Audio aniqlash ishlamaydi.")
 
 # =================== COOKIES ===================
 COOKIES_FILE = "cookies.txt"
 COOKIES_AVAILABLE = os.path.exists(COOKIES_FILE)
-if COOKIES_AVAILABLE:
-    print("✅ YouTube cookies topildi!")
-else:
-    print("⚠️ cookies.txt topilmadi!")
-
-# =================== CACHE (MA'LUMOTLARNI SAQLASH) ===================
-class DataCache:
-    """Ma'lumotlarni saqlash va vaqt o'tganda ham ishlatish uchun"""
-    
-    def __init__(self, cache_dir: Path):
-        self.cache_dir = cache_dir
-        self.video_cache_file = cache_dir / "video_cache.json"
-        self.song_cache_file = cache_dir / "song_cache.json"
-        self.load()
-    
-    def load(self):
-        """Saqlangan ma'lumotlarni yuklash"""
-        self.video_cache = {}
-        self.song_cache = {}
-        
-        if self.video_cache_file.exists():
-            try:
-                with open(self.video_cache_file, 'r') as f:
-                    data = json.load(f)
-                    # Eski ma'lumotlarni tozalash (24 soatdan eskilari)
-                    now = time.time()
-                    for key, value in data.items():
-                        if now - value.get('timestamp', 0) < Config.CACHE_TTL:
-                            self.video_cache[key] = value
-                print(f"✅ {len(self.video_cache)} ta video ma'lumoti yuklandi")
-            except:
-                pass
-        
-        if self.song_cache_file.exists():
-            try:
-                with open(self.song_cache_file, 'r') as f:
-                    data = json.load(f)
-                    now = time.time()
-                    for key, value in data.items():
-                        if now - value.get('timestamp', 0) < Config.CACHE_TTL:
-                            self.song_cache[key] = value
-                print(f"✅ {len(self.song_cache)} ta song ma'lumoti yuklandi")
-            except:
-                pass
-    
-    def save(self):
-        """Ma'lumotlarni saqlash"""
-        with open(self.video_cache_file, 'w') as f:
-            json.dump(self.video_cache, f, indent=2)
-        with open(self.song_cache_file, 'w') as f:
-            json.dump(self.song_cache, f, indent=2)
-    
-    def add_video(self, key: str, data: dict):
-        """Video ma'lumotini saqlash"""
-        data['timestamp'] = time.time()
-        self.video_cache[key] = data
-        self.save()
-    
-    def get_video(self, key: str) -> Optional[dict]:
-        """Video ma'lumotini olish"""
-        data = self.video_cache.get(key)
-        if data:
-            # Tekshirish: 24 soatdan eski bo'lsa o'chirish
-            if time.time() - data.get('timestamp', 0) > Config.CACHE_TTL:
-                del self.video_cache[key]
-                self.save()
-                return None
-        return data
-    
-    def add_song(self, key: str, data: dict):
-        """Song ma'lumotini saqlash"""
-        data['timestamp'] = time.time()
-        self.song_cache[key] = data
-        self.save()
-    
-    def get_song(self, key: str) -> Optional[dict]:
-        """Song ma'lumotini olish"""
-        data = self.song_cache.get(key)
-        if data:
-            if time.time() - data.get('timestamp', 0) > Config.CACHE_TTL:
-                del self.song_cache[key]
-                self.save()
-                return None
-        return data
-
-# Global cache
-cache = DataCache(Config.CACHE_PATH)
 
 # =================== BOT ===================
-session = AiohttpSession(timeout=60)
-bot = Bot(
-    token=Config.BOT_TOKEN, 
-    session=session,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+session = AiohttpSession(timeout=90)
+bot = Bot(token=Config.BOT_TOKEN, session=session,
+          default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 pool = ThreadPoolExecutor(max_workers=2)
 
 temp_data: Dict[str, dict] = {}
+video_cache: Dict[str, dict] = {}
 bot_running = True
 shazam = Shazam() if SHAZAM_AVAILABLE else None
 
@@ -192,12 +100,12 @@ def format_duration(seconds):
     secs = int(seconds % 60)
     return f"{minutes}:{secs:02d}"
 
-def format_size(bytes_size: int) -> str:
+def format_size(size: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes_size < 1024:
-            return f"{bytes_size:.1f} {unit}"
-        bytes_size /= 1024
-    return f"{bytes_size:.1f} TB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 def get_ytdlp_opts(extra=None):
     opts = {
@@ -213,31 +121,35 @@ def get_ytdlp_opts(extra=None):
         opts.update(extra)
     return opts
 
-# =================== SHAZAM ===================
+# =================== SHAZAM AUDIO ANIQLASH ===================
 async def identify_audio_from_video(video_path: str) -> Optional[dict]:
+    """Shazam orqali video ichidagi qo'shiqni aniqlaydi"""
     if not SHAZAM_AVAILABLE or not shazam or not FFMPEG_AVAILABLE:
         return None
     
     try:
         audio_path = str(Config.TEMP_PATH / f"sample_{int(time.time())}.mp3")
         
+        # Videodan audio kesib olish
         cmd = [
             'ffmpeg', '-i', video_path,
-            '-ss', '5',
-            '-t', str(Config.AUDIO_SAMPLE_DURATION),
+            '-ss', '5',  # 5-soniyadan boshlab
+            '-t', str(Config.AUDIO_SAMPLE_DURATION),  # 15 soniya
             '-q:a', '0',
             '-map', 'a',
             audio_path,
             '-y'
         ]
         
-        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if not os.path.exists(audio_path):
             return None
         
+        # Shazam orqali aniqlash
         shazam_result = await shazam.recognize(audio_path)
         
+        # Tozalash
         if os.path.exists(audio_path):
             os.remove(audio_path)
         
@@ -248,9 +160,10 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
                 'artist': track.get('subtitle', ''),
                 'full_title': f"{track.get('subtitle', '')} - {track.get('title', '')}",
             }
+        
         return None
     except Exception as e:
-        logging.error(f"Audio aniqlashda xatolik: {e}")
+        logging.error(f"Audio aniqlash xatosi: {e}")
         return None
 
 # =================== YUKLASH ===================
@@ -293,10 +206,7 @@ async def download_mp3(url: str, user_id: int):
                 filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
                 return filename, info.get('title', 'Audio')
         except Exception as e:
-            error_msg = str(e)
-            if "Sign in to confirm" in error_msg:
-                error_msg = "❌ cookies.txt kerak!"
-            return None, error_msg
+            return None, str(e)
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
 async def search_songs(query: str, limit: int = 10) -> List[dict]:
@@ -308,7 +218,7 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
                 songs = []
                 for i, item in enumerate(data.get('entries', []), 1):
                     if item:
-                        title = item.get('title', 'Noma\'lum')
+                        title = item.get('title', 'Nomaʼlum')
                         artist = ""
                         if ' - ' in title:
                             parts = title.split(' - ', 1)
@@ -330,14 +240,26 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
 # =================== BOT ===================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    shazam_status = "✅ Mavjud" if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE else "❌ Yoq"
     await message.answer(
-        "🎵 <b>MP3 Bot</b> 🎵\n\n"
-        "📥 <b>Link yuboring:</b>\n"
-        "YouTube | Instagram | TikTok | Facebook\n\n"
-        "🔍 <b>Qo'shiq qidirish:</b>\n"
-        "Masalan: Shohruhxon\n\n"
-        "✅ <b>Tugmalar vaqt o'tganda ham ishlaydi!</b>\n"
-        "⚡ 7/24 ishlaydi"
+        f"🎵 <b>MP3 Bot</b>\n\n"
+        f"📥 Instagram/TikTok/Facebook video yuboring:\n"
+        f"→ Video ichidagi qoʻshiq Shazam orqali aniqlanadi\n"
+        f"→ MP3 yuklash + oʻxshash qoʻshiqlar tugmasi chiqadi\n\n"
+        f"🔍 Qoʻshiq nomi yozing: <code>Shohruhxon</code>\n\n"
+        f"🎬 YouTube linki yuboring: MP3 yuklash tugmasi\n\n"
+        f"🎧 Shazam: {shazam_status}"
+    )
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "📖 Yordam\n\n"
+        "1. Instagram/TikTok/Facebook video yuboring\n"
+        "   → Shazam qoʻshiqni aniqlaydi\n"
+        "   → MP3 yuklash va oʻxshash qoʻshiqlar\n\n"
+        "2. Qoʻshiq nomi yozing: qidiruv natijalari\n\n"
+        "3. YouTube linki: MP3 yuklash"
     )
 
 @dp.message(F.text)
@@ -346,127 +268,91 @@ async def handle_message(message: Message):
     user_id = message.from_user.id
     
     if re.match(r'^https?://', text):
-        await process_url(message, text, user_id)
+        platform = get_platform(text)
+        if platform == 'other':
+            await message.answer("�️ Faqat YouTube, Instagram, TikTok, Facebook linklari!")
+            return
+        
+        if platform == 'youtube':
+            await handle_youtube(message, text, user_id)
+        else:
+            # Instagram, TikTok, Facebook -> video + Shazam + tugmalar
+            await handle_social_video(message, text, user_id, platform)
     else:
         await process_search(message, text, user_id)
 
-async def process_url(message: Message, url: str, user_id: int):
-    platform = get_platform(url)
-    
-    if platform == 'other':
-        await message.answer("❌ Faqat YouTube, Instagram, TikTok, Facebook linklari!")
-        return
-    
-    if platform != 'youtube':
-        await handle_social_video(message, url, user_id, platform)
-    else:
-        await handle_youtube(message, url, user_id)
-
-# YouTube: faqat MP3 tugmasi (tezroq)
+# ========== YOUTUBE ==========
 async def handle_youtube(message: Message, url: str, user_id: int):
-    msg = await message.answer("⏳ Ma'lumot olinmoqda...")
+    msg = await message.answer("⏳ Maʼlumot olinmoqda...")
     
     url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
-    
-    # Avval keshdan tekshirish
-    cached = cache.get_video(url_hash)
-    if cached:
-        title = cached.get('title', 'YouTube Video')
-        duration = cached.get('duration', 0)
-    else:
-        def get_info():
-            try:
-                opts = get_ytdlp_opts({'extract_flat': True})
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    return info.get('title', 'Video'), info.get('duration', 0)
-            except:
-                return url[:50], 0
-        
-        title, duration = await asyncio.get_event_loop().run_in_executor(pool, get_info)
-        cache.add_video(url_hash, {'url': url, 'title': title, 'duration': duration, 'platform': platform})
-    
+    video_cache[url_hash] = {'url': url, 'title': 'YouTube video', 'duration': 0}
     await msg.delete()
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{url_hash}")],
-        [InlineKeyboardButton(text="🔍 O'xshash qo'shiqlar", callback_data=f"similar_{url_hash}")]
+        [InlineKeyboardButton(text="🔍 Oʻxshash qoʻshiqlar", callback_data=f"similar_{url_hash}")]
     ])
     
     await message.answer(
-        f"🎬 <b>YouTube</b>\n📹 <b>{title[:60]}</b>\n⏱️ {format_duration(duration)}\n\n👇 Tanlang:",
+        f"🎬 YouTube\n👇 MP3 yuklash uchun tugmani bosing:",
         reply_markup=keyboard
     )
 
-# Instagram/TikTok/Facebook: video + tugmalar
+# ========== INSTAGRAM/TIKTOK/FACEBOOK (SHAZAM BILAN) ==========
 async def handle_social_video(message: Message, url: str, user_id: int, platform: str):
-    status = await message.answer("⏳ Video yuklanmoqda... (1-2 daqiqa)")
-    
+    status = await message.answer("⏳ Video yuklanmoqda (1-2 daqiqa)...")
     filename, title, duration = await download_video(url, user_id)
     await status.delete()
     
     if not filename or not os.path.exists(filename):
-        await message.answer("❌ Yuklab bo'lmadi!")
+        await message.answer("❌ Videoni yuklab boʻlmadi!")
         return
     
     file_size = os.path.getsize(filename)
-    if file_size > Config.MAX_FILE_SIZE:
-        await message.answer(f"❌ Video juda katta ({format_size(file_size)})")
-        os.remove(filename)
-        return
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
     
-    # Shazam aniqlash
+    # ========== SHAZAM ANIQLASH ==========
     identified_song = None
     if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE:
-        detect_msg = await message.answer("🎵 Video ichidagi qo'shiq aniqlanmoqda (Shazam)...")
+        detect_msg = await message.answer("🎵 Shazam: videodagi qoʻshiq aniqlanmoqda...")
         identified_song = await identify_audio_from_video(filename)
         await detect_msg.delete()
     
-    url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
-    
-    if identified_song:
-        search_title = identified_song['full_title']
-        detected_text = f"\n\n🎯 <b>Shazam topdi:</b> {identified_song['full_title'][:60]}"
-    else:
-        search_title = title
-        detected_text = ""
-    
-    # Keshga saqlash
-    cache.add_video(url_hash, {
-        'url': url, 
-        'title': title, 
+    # Ma'lumotni saqlash
+    video_cache[url_hash] = {
+        'url': url,
+        'title': title,
         'duration': duration,
         'platform': platform,
-        'identified_song': identified_song,
-        'search_query': search_title
-    })
+        'identified_song': identified_song
+    }
     
-    platform_emoji = {'instagram': '📸', 'tiktok': '🎵', 'facebook': '📘'}
-    
+    # Tugmalar
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{url_hash}")],
-        [InlineKeyboardButton(text="🔍 O'xshash qo'shiqlar", callback_data=f"similar_{url_hash}")]
+        [InlineKeyboardButton(text="🔍 Oʻxshash qoʻshiqlar", callback_data=f"similar_{url_hash}")]
     ])
     
-    caption = f"{platform_emoji.get(platform, '📹')} <b>{title[:60]}</b>\n⏱️ {format_duration(duration)}\n📦 {format_size(file_size)}"
-    if detected_text:
-        caption += detected_text
+    platform_emoji = {'instagram': '📸', 'tiktok': '🎵', 'facebook': '📘'}
+    caption = f"{platform_emoji.get(platform, '📹')} <b>{title[:60]}</b>\n⏱ {format_duration(duration)} 📦 {format_size(file_size)}"
     
-    await message.answer_video(
-        FSInputFile(filename),
-        caption=caption,
-        reply_markup=keyboard
-    )
+    if identified_song:
+        caption += f"\n\n🎯 <b>Shazam topdi:</b> {identified_song['full_title'][:70]}"
+    else:
+        caption += "\n\n⚠️ Qoʻshiq aniqlanmadi (audio sifati yoki Shazam xatosi)"
+    
+    await message.answer_video(FSInputFile(filename), caption=caption, reply_markup=keyboard)
     os.remove(filename)
 
-# Qidiruv
+# ========== QIDIRUV ==========
 async def process_search(message: Message, query: str, user_id: int):
     status = await message.answer(f"🔍 <b>{query}</b> qidirilmoqda...")
     songs = await search_songs(query, limit=10)
     await status.delete()
     
     if not songs:
-        await message.answer("❌ Hech narsa topilmadi!")
+        await message.answer("❌ Hech narsa topilmadi.")
         return
     
     result = f"🎵 <b>{query}</b>\n\n"
@@ -480,40 +366,30 @@ async def process_search(message: Message, query: str, user_id: int):
     for s in songs:
         song_id = hashlib.md5(s['url'].encode()).hexdigest()[:10]
         temp_data[song_id] = s
-        # Qidiruv tugmalari 24 soat saqlanadi
-        cache.add_song(song_id, s)
         builder.button(text=f"{s['number']}. {s['title'][:30]}", callback_data=f"dl_{song_id}")
     builder.adjust(2)
     
     await message.answer(result, reply_markup=builder.as_markup())
 
-# MP3 yuklash
+# ========== MP3 YUKLASH ==========
 @dp.callback_query(F.data.startswith("dl_"))
 async def download_selected(call: CallbackQuery):
     song_id = call.data.replace("dl_", "")
-    
-    # Avval temp_data dan, keyin cachedan tekshirish
     song = temp_data.get(song_id)
     if not song:
-        song = cache.get_song(song_id)
-    
-    if not song:
-        await call.answer("❌ Ma'lumot eskirgan! Qaytadan qidiring.", show_alert=True)
+        await call.answer("❌ Qaytadan qidiring!", show_alert=True)
         return
     
     await call.answer("⏳")
-    msg = await call.message.answer(f"⏳ {song.get('title', 'Qo\'shiq')[:40]} yuklanmoqda...")
-    
+    msg = await call.message.answer(f"⏳ {song['title'][:40]} yuklanmoqda...")
     filename, result = await download_mp3(song['url'], call.from_user.id)
     await msg.delete()
     
     if filename and os.path.exists(filename):
         size = os.path.getsize(filename)
-        await call.message.answer_audio(
-            FSInputFile(filename),
-            caption=f"🎵 <b>{song.get('title', 'Qo\'shiq')[:50]}</b>\n📦 {format_size(size)}",
-            title=song.get('title', 'Audio')[:64]
-        )
+        await call.message.answer_audio(FSInputFile(filename),
+            caption=f"🎵 <b>{song['title'][:50]}</b>\n📦 {format_size(size)}",
+            title=song['title'][:64])
         os.remove(filename)
     else:
         await call.message.answer(f"❌ {result[:200]}")
@@ -521,59 +397,55 @@ async def download_selected(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("mp3_"))
 async def mp3_from_url(call: CallbackQuery):
     url_hash = call.data.replace("mp3_", "")
-    
-    # Keshdan video ma'lumotini olish
-    song = cache.get_video(url_hash)
+    song = video_cache.get(url_hash)
     if not song:
-        await call.answer("❌ Ma'lumot topilmadi! Qaytadan link yuboring.", show_alert=True)
+        await call.answer("❌ Linkni qayta yuboring!", show_alert=True)
         return
     
     await call.answer("⏳")
     msg = await call.message.answer("⏳ MP3 yuklanmoqda...")
-    
     filename, result = await download_mp3(song['url'], call.from_user.id)
     await msg.delete()
     
     if filename and os.path.exists(filename):
         size = os.path.getsize(filename)
-        await call.message.answer_audio(
-            FSInputFile(filename),
-            caption=f"🎵 <b>{song.get('title', 'Qo\'shiq')[:50]}</b>\n📦 {format_size(size)}",
-            title=song.get('title', 'Audio')[:64]
-        )
+        await call.message.answer_audio(FSInputFile(filename),
+            caption=f"🎵 <b>{song.get('title', 'Audio')[:50]}</b>\n📦 {format_size(size)}",
+            title=song.get('title', 'Audio')[:64])
         os.remove(filename)
     else:
         await call.message.answer(f"❌ {result[:200]}")
 
-# O'xshash qo'shiqlar
+# ========== OXSHASH QO'SHIQLAR ==========
 @dp.callback_query(F.data.startswith("similar_"))
 async def similar_songs(call: CallbackQuery):
     url_hash = call.data.replace("similar_", "")
-    
-    song = cache.get_video(url_hash)
+    song = video_cache.get(url_hash)
     if not song:
-        await call.answer("❌ Ma'lumot topilmadi!", show_alert=True)
+        await call.answer("❌ Maʼlumot topilmadi!", show_alert=True)
         return
     
     await call.answer("🔍")
     
-    if song.get('identified_song'):
+    # Qidiruv so'zini aniqlash
+    if song.get('identified_song') and song['identified_song'].get('full_title'):
         search_query = song['identified_song']['full_title']
+        source = "Shazam"
     else:
-        search_query = song.get('title', '')
+        search_query = song.get('title', '')[:60]
+        source = "video sarlavhasi"
         if ' - ' in search_query:
             search_query = search_query.split(' - ')[0]
     
-    msg = await call.message.answer(f"🔍 {search_query[:40]} o'xshashlari...")
-    
+    msg = await call.message.answer(f"🔍 {search_query[:40]} oʻxshashlari ({source})...")
     songs = await search_songs(search_query, limit=10)
     await msg.delete()
     
     if not songs:
-        await call.message.answer("❌ O'xshash qo'shiqlar topilmadi!")
+        await call.message.answer("❌ Oʻxshash qoʻshiqlar topilmadi!")
         return
     
-    result = f"🎵 <b>O'xshash qo'shiqlar:</b>\n📌 {search_query[:50]}\n\n"
+    result = f"🎵 <b>Oʻxshash qoʻshiqlar</b>\n📌 {search_query[:50]}\n\n"
     for s in songs:
         if s['artist']:
             result += f"<b>{s['number']}.</b> {s['artist']} - {s['title']}  <code>{s['duration']}</code>\n"
@@ -582,10 +454,9 @@ async def similar_songs(call: CallbackQuery):
     
     builder = InlineKeyboardBuilder()
     for s in songs:
-        song_id = hashlib.md5(s['url'].encode()).hexdigest()[:10]
-        temp_data[song_id] = s
-        cache.add_song(song_id, s)
-        builder.button(text=f"{s['number']}. {s['title'][:30]}", callback_data=f"dl_{song_id}")
+        sid = hashlib.md5(s['url'].encode()).hexdigest()[:10]
+        temp_data[sid] = s
+        builder.button(text=f"{s['number']}. {s['title'][:30]}", callback_data=f"dl_{sid}")
     builder.adjust(2)
     builder.button(text="◀️ Ortga", callback_data=f"back_{url_hash}")
     
@@ -594,31 +465,29 @@ async def similar_songs(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("back_"))
 async def go_back(call: CallbackQuery):
     url_hash = call.data.replace("back_", "")
-    song = cache.get_video(url_hash)
-    
+    song = video_cache.get(url_hash)
     if not song:
-        await call.answer("❌ Ma'lumot topilmadi!", show_alert=True)
+        await call.answer("❌", show_alert=True)
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{url_hash}")],
-        [InlineKeyboardButton(text="🔍 O'xshash qo'shiqlar", callback_data=f"similar_{url_hash}")]
+        [InlineKeyboardButton(text="🔍 Oʻxshash qoʻshiqlar", callback_data=f"similar_{url_hash}")]
     ])
     
     await call.message.edit_text(
-        f"📹 <b>{song.get('title', 'Video')[:50]}</b>\n⏱️ {format_duration(song.get('duration', 0))}\n\n👇 Tanlang:",
+        f"📹 <b>{song.get('title', 'Video')[:50]}</b>\n⏱ {format_duration(song.get('duration', 0))}\n\n👇 Tanlang:",
         reply_markup=keyboard
     )
 
-# =================== KEEP-ALIVE ===================
+# ========== KEEP-ALIVE ==========
 async def keep_alive():
     async def handler(reader, writer):
         writer.write(b"HTTP/1.1 200 OK\r\n\r\nalive")
         await writer.drain()
         writer.close()
-    
     server = await asyncio.start_server(handler, '0.0.0.0', Config.KEEP_ALIVE_PORT)
-    print(f"🟢 Keep-alive: 0.0.0.0:{Config.KEEP_ALIVE_PORT}")
+    print(f"🟢 Keep-alive: {Config.KEEP_ALIVE_PORT}")
     async with server:
         await server.serve_forever()
 
@@ -630,35 +499,33 @@ async def self_ping():
                 await sess.get(f"http://127.0.0.1:{Config.KEEP_ALIVE_PORT}", timeout=5)
             except:
                 pass
-            await asyncio.sleep(Config.PING_INTERVAL)
+            await asyncio.sleep(300)
 
-# =================== STARTUP ===================
+# ========== STARTUP ==========
 @dp.startup()
 async def on_startup():
     print("🚀 Bot ishga tushmoqda...")
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Webhook tozalandi")
-    print(f"✅ Cache: {Config.CACHE_PATH}")
-    print(f"✅ Ma'lumotlar 24 soat saqlanadi")
     if COOKIES_AVAILABLE:
         print("✅ YouTube cookies mavjud")
     else:
-        print("⚠️ cookies.txt yo'q")
+        print("⚠️ cookies.txt yo‘q")
+    if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE:
+        print("✅ Shazam audio aniqlash tayyor")
+    else:
+        print("⚠️ Shazam ishlamaydi: Shazam yoki FFmpeg yo‘q")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    
     asyncio.create_task(keep_alive())
     asyncio.create_task(self_ping())
-    
     bot_info = await bot.get_me()
     print(f"🤖 @{bot_info.username} ishga tushdi")
-    
     await dp.start_polling(bot)
 
 def signal_handler(sig, frame):
     global bot_running
-    print("\n⏹️ To'xtatilmoqda...")
     bot_running = False
     sys.exit(0)
 
@@ -669,4 +536,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("To'xtatildi.")
+        print("To‘xtatildi.")
