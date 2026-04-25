@@ -6,9 +6,11 @@ import time
 import subprocess
 import signal
 import sys
-from datetime import datetime
+import json
+import pickle
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
@@ -30,10 +32,8 @@ import aiohttp
 try:
     from shazamio import Shazam
     SHAZAM_AVAILABLE = True
-    print("✅ Shazamio o'rnatilgan!")
 except ImportError:
     SHAZAM_AVAILABLE = False
-    print("⚠️ Shazamio o'rnatilmagan!")
 
 # =================== KONFIGURATSIYA ===================
 load_dotenv()
@@ -42,10 +42,12 @@ class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     DOWNLOADS_PATH = Path("/tmp/downloads")
     TEMP_PATH = Path("/tmp/temp_audio")
+    CACHE_PATH = Path("/tmp/cache")  # Ma'lumotlarni saqlash uchun
     MAX_FILE_SIZE = 50 * 1024 * 1024
     AUDIO_SAMPLE_DURATION = 15
     KEEP_ALIVE_PORT = int(os.getenv("PORT", "8080"))
     PING_INTERVAL = 300
+    CACHE_TTL = 86400  # 24 soat (ma'lumotlar 1 kun saqlanadi)
 
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
@@ -53,8 +55,9 @@ if not Config.BOT_TOKEN:
 # Papkalar
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True)
 Config.TEMP_PATH.mkdir(exist_ok=True)
+Config.CACHE_PATH.mkdir(exist_ok=True)
 
-# =================== FFMPEG TEKSHIRISH ===================
+# =================== FFMPEG ===================
 def check_ffmpeg():
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
@@ -64,24 +67,96 @@ def check_ffmpeg():
 
 FFMPEG_AVAILABLE = check_ffmpeg()
 
-# =================== COOKIES (MUHIM!) ===================
+# =================== COOKIES ===================
 COOKIES_FILE = "cookies.txt"
 COOKIES_AVAILABLE = os.path.exists(COOKIES_FILE)
-
 if COOKIES_AVAILABLE:
-    # Cookie faylini o'qish va tekshirish
-    try:
-        with open(COOKIES_FILE, 'r') as f:
-            cookie_content = f.read()
-            if '.youtube.com' in cookie_content:
-                print("✅ YouTube cookies fayli topildi va to'g'ri formatda!")
-            else:
-                print("⚠️ cookies.txt fayli bor lekin YouTube cookiesi topilmadi!")
-    except:
-        print("⚠️ cookies.txt faylini o'qib bo'lmadi!")
+    print("✅ YouTube cookies topildi!")
 else:
-    print("⚠️ cookies.txt fayli TOPILMADI! YouTube sign in xatosi chiqadi!")
-    print("   Render -> Secrets -> cookies.txt faylini yarating")
+    print("⚠️ cookies.txt topilmadi!")
+
+# =================== CACHE (MA'LUMOTLARNI SAQLASH) ===================
+class DataCache:
+    """Ma'lumotlarni saqlash va vaqt o'tganda ham ishlatish uchun"""
+    
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self.video_cache_file = cache_dir / "video_cache.json"
+        self.song_cache_file = cache_dir / "song_cache.json"
+        self.load()
+    
+    def load(self):
+        """Saqlangan ma'lumotlarni yuklash"""
+        self.video_cache = {}
+        self.song_cache = {}
+        
+        if self.video_cache_file.exists():
+            try:
+                with open(self.video_cache_file, 'r') as f:
+                    data = json.load(f)
+                    # Eski ma'lumotlarni tozalash (24 soatdan eskilari)
+                    now = time.time()
+                    for key, value in data.items():
+                        if now - value.get('timestamp', 0) < Config.CACHE_TTL:
+                            self.video_cache[key] = value
+                print(f"✅ {len(self.video_cache)} ta video ma'lumoti yuklandi")
+            except:
+                pass
+        
+        if self.song_cache_file.exists():
+            try:
+                with open(self.song_cache_file, 'r') as f:
+                    data = json.load(f)
+                    now = time.time()
+                    for key, value in data.items():
+                        if now - value.get('timestamp', 0) < Config.CACHE_TTL:
+                            self.song_cache[key] = value
+                print(f"✅ {len(self.song_cache)} ta song ma'lumoti yuklandi")
+            except:
+                pass
+    
+    def save(self):
+        """Ma'lumotlarni saqlash"""
+        with open(self.video_cache_file, 'w') as f:
+            json.dump(self.video_cache, f, indent=2)
+        with open(self.song_cache_file, 'w') as f:
+            json.dump(self.song_cache, f, indent=2)
+    
+    def add_video(self, key: str, data: dict):
+        """Video ma'lumotini saqlash"""
+        data['timestamp'] = time.time()
+        self.video_cache[key] = data
+        self.save()
+    
+    def get_video(self, key: str) -> Optional[dict]:
+        """Video ma'lumotini olish"""
+        data = self.video_cache.get(key)
+        if data:
+            # Tekshirish: 24 soatdan eski bo'lsa o'chirish
+            if time.time() - data.get('timestamp', 0) > Config.CACHE_TTL:
+                del self.video_cache[key]
+                self.save()
+                return None
+        return data
+    
+    def add_song(self, key: str, data: dict):
+        """Song ma'lumotini saqlash"""
+        data['timestamp'] = time.time()
+        self.song_cache[key] = data
+        self.save()
+    
+    def get_song(self, key: str) -> Optional[dict]:
+        """Song ma'lumotini olish"""
+        data = self.song_cache.get(key)
+        if data:
+            if time.time() - data.get('timestamp', 0) > Config.CACHE_TTL:
+                del self.song_cache[key]
+                self.save()
+                return None
+        return data
+
+# Global cache
+cache = DataCache(Config.CACHE_PATH)
 
 # =================== BOT ===================
 session = AiohttpSession(timeout=60)
@@ -94,9 +169,7 @@ dp = Dispatcher()
 pool = ThreadPoolExecutor(max_workers=2)
 
 temp_data: Dict[str, dict] = {}
-video_cache: Dict[str, dict] = {}
 bot_running = True
-
 shazam = Shazam() if SHAZAM_AVAILABLE else None
 
 # =================== YORDAMCHI ===================
@@ -126,29 +199,21 @@ def format_size(bytes_size: int) -> str:
         bytes_size /= 1024
     return f"{bytes_size:.1f} TB"
 
-# =================== YT-DLP SOZLAMALARI (COOKIES BILAN) ===================
 def get_ytdlp_opts(extra=None):
     opts = {
         'quiet': True,
         'no_warnings': True,
         'retries': 3,
         'socket_timeout': 30,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     }
-    
-    # 🔥 COOKIES QO'SHISH (MUHIM!)
     if COOKIES_AVAILABLE:
         opts['cookiefile'] = COOKIES_FILE
-        print("🍪 Cookies fayli yuklandi")
-    else:
-        print("⚠️ Cookies fayli yo'q!")
-    
     if extra:
         opts.update(extra)
     return opts
 
-# =================== SHAZAM AUDIO ANIQLASH ===================
+# =================== SHAZAM ===================
 async def identify_audio_from_video(video_path: str) -> Optional[dict]:
     if not SHAZAM_AVAILABLE or not shazam or not FFMPEG_AVAILABLE:
         return None
@@ -188,7 +253,7 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
         logging.error(f"Audio aniqlashda xatolik: {e}")
         return None
 
-# =================== YUKLASH FUNKSIYALARI ===================
+# =================== YUKLASH ===================
 async def download_video(url: str, user_id: int):
     def run():
         try:
@@ -230,7 +295,7 @@ async def download_mp3(url: str, user_id: int):
         except Exception as e:
             error_msg = str(e)
             if "Sign in to confirm" in error_msg:
-                error_msg = "❌ YouTube botni aniqladi! Iltimos, administrator cookies.txt qo'shsin."
+                error_msg = "❌ cookies.txt kerak!"
             return None, error_msg
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
@@ -262,33 +327,17 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
             return []
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
-# =================== BOT BUYRUQLARI ===================
+# =================== BOT ===================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    cookie_status = "✅ Mavjud" if COOKIES_AVAILABLE else "❌ Yo'q"
-    shazam_status = "✅ Mavjud" if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE else "❌ Yo'q"
-    
     await message.answer(
-        f"🎵 <b>MP3 Bot</b> 🎵\n\n"
-        f"📥 <b>Link yuboring:</b>\n"
-        f"YouTube | Instagram | TikTok | Facebook\n\n"
-        f"🔍 <b>Qo'shiq qidirish:</b>\n"
-        f"Masalan: Shohruhxon, Yalla\n\n"
-        f"🍪 <b>YouTube cookie:</b> {cookie_status}\n"
-        f"🎯 <b>Shazam audio:</b> {shazam_status}\n"
-        f"⚡ 7/24 ishlaydi"
-    )
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    await message.answer(
-        "📖 <b>Yordam</b>\n\n"
-        "1. Qo'shiq nomi yozing \n"
-        "2. YouTube linki - MP3 yuklash tugmasi\n"
-        "3. Instagram/TikTok linki - video + Shazam\n\n"
-        "🔍 O'xshash qo'shiqlar tugmasi\n\n"
-        "❌ 'Sign in to confirm' xatosi chiqsa,\n"
-        "   admin cookies.txt qo'shishi kerak"
+        "🎵 <b>MP3 Bot</b> 🎵\n\n"
+        "📥 <b>Link yuboring:</b>\n"
+        "YouTube | Instagram | TikTok | Facebook\n\n"
+        "🔍 <b>Qo'shiq qidirish:</b>\n"
+        "Masalan: Shohruhxon\n\n"
+        "✅ <b>Tugmalar vaqt o'tganda ham ishlaydi!</b>\n"
+        "⚡ 7/24 ishlaydi"
     )
 
 @dp.message(F.text)
@@ -301,7 +350,6 @@ async def handle_message(message: Message):
     else:
         await process_search(message, text, user_id)
 
-# =================== URL QAYTA ISHLASH ===================
 async def process_url(message: Message, url: str, user_id: int):
     platform = get_platform(url)
     
@@ -314,23 +362,31 @@ async def process_url(message: Message, url: str, user_id: int):
     else:
         await handle_youtube(message, url, user_id)
 
+# YouTube: faqat MP3 tugmasi (tezroq)
 async def handle_youtube(message: Message, url: str, user_id: int):
     msg = await message.answer("⏳ Ma'lumot olinmoqda...")
     
-    def get_info():
-        try:
-            opts = get_ytdlp_opts({'extract_flat': True})
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return info.get('title', 'Video'), info.get('duration', 0)
-        except Exception as e:
-            return str(e)[:50], 0
-    
-    title, duration = await asyncio.get_event_loop().run_in_executor(pool, get_info)
-    await msg.delete()
-    
     url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
-    video_cache[url_hash] = {'url': url, 'title': title, 'duration': duration}
+    
+    # Avval keshdan tekshirish
+    cached = cache.get_video(url_hash)
+    if cached:
+        title = cached.get('title', 'YouTube Video')
+        duration = cached.get('duration', 0)
+    else:
+        def get_info():
+            try:
+                opts = get_ytdlp_opts({'extract_flat': True})
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return info.get('title', 'Video'), info.get('duration', 0)
+            except:
+                return url[:50], 0
+        
+        title, duration = await asyncio.get_event_loop().run_in_executor(pool, get_info)
+        cache.add_video(url_hash, {'url': url, 'title': title, 'duration': duration, 'platform': platform})
+    
+    await msg.delete()
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{url_hash}")],
@@ -342,6 +398,7 @@ async def handle_youtube(message: Message, url: str, user_id: int):
         reply_markup=keyboard
     )
 
+# Instagram/TikTok/Facebook: video + tugmalar
 async def handle_social_video(message: Message, url: str, user_id: int, platform: str):
     status = await message.answer("⏳ Video yuklanmoqda... (1-2 daqiqa)")
     
@@ -374,13 +431,15 @@ async def handle_social_video(message: Message, url: str, user_id: int, platform
         search_title = title
         detected_text = ""
     
-    video_cache[url_hash] = {
+    # Keshga saqlash
+    cache.add_video(url_hash, {
         'url': url, 
         'title': title, 
         'duration': duration,
+        'platform': platform,
         'identified_song': identified_song,
         'search_query': search_title
-    }
+    })
     
     platform_emoji = {'instagram': '📸', 'tiktok': '🎵', 'facebook': '📘'}
     
@@ -400,7 +459,7 @@ async def handle_social_video(message: Message, url: str, user_id: int, platform
     )
     os.remove(filename)
 
-# =================== QIDIRUV ===================
+# Qidiruv
 async def process_search(message: Message, query: str, user_id: int):
     status = await message.answer(f"🔍 <b>{query}</b> qidirilmoqda...")
     songs = await search_songs(query, limit=10)
@@ -421,23 +480,29 @@ async def process_search(message: Message, query: str, user_id: int):
     for s in songs:
         song_id = hashlib.md5(s['url'].encode()).hexdigest()[:10]
         temp_data[song_id] = s
+        # Qidiruv tugmalari 24 soat saqlanadi
+        cache.add_song(song_id, s)
         builder.button(text=f"{s['number']}. {s['title'][:30]}", callback_data=f"dl_{song_id}")
     builder.adjust(2)
     
     await message.answer(result, reply_markup=builder.as_markup())
 
-# =================== MP3 YUKLASH ===================
+# MP3 yuklash
 @dp.callback_query(F.data.startswith("dl_"))
 async def download_selected(call: CallbackQuery):
     song_id = call.data.replace("dl_", "")
+    
+    # Avval temp_data dan, keyin cachedan tekshirish
     song = temp_data.get(song_id)
+    if not song:
+        song = cache.get_song(song_id)
     
     if not song:
-        await call.answer("❌ Qaytadan qidiring!", show_alert=True)
+        await call.answer("❌ Ma'lumot eskirgan! Qaytadan qidiring.", show_alert=True)
         return
     
     await call.answer("⏳")
-    msg = await call.message.answer(f"⏳ {song['title'][:40]} yuklanmoqda...")
+    msg = await call.message.answer(f"⏳ {song.get('title', 'Qo\'shiq')[:40]} yuklanmoqda...")
     
     filename, result = await download_mp3(song['url'], call.from_user.id)
     await msg.delete()
@@ -446,20 +511,21 @@ async def download_selected(call: CallbackQuery):
         size = os.path.getsize(filename)
         await call.message.answer_audio(
             FSInputFile(filename),
-            caption=f"🎵 <b>{song['title'][:50]}</b>\n📦 {format_size(size)}",
-            title=song['title'][:64]
+            caption=f"🎵 <b>{song.get('title', 'Qo\'shiq')[:50]}</b>\n📦 {format_size(size)}",
+            title=song.get('title', 'Audio')[:64]
         )
         os.remove(filename)
     else:
-        await call.message.answer(f"❌ {result[:150]}")
+        await call.message.answer(f"❌ {result[:200]}")
 
 @dp.callback_query(F.data.startswith("mp3_"))
 async def mp3_from_url(call: CallbackQuery):
     url_hash = call.data.replace("mp3_", "")
-    song = video_cache.get(url_hash)
     
+    # Keshdan video ma'lumotini olish
+    song = cache.get_video(url_hash)
     if not song:
-        await call.answer("❌ Qaytadan link yuboring!", show_alert=True)
+        await call.answer("❌ Ma'lumot topilmadi! Qaytadan link yuboring.", show_alert=True)
         return
     
     await call.answer("⏳")
@@ -472,19 +538,19 @@ async def mp3_from_url(call: CallbackQuery):
         size = os.path.getsize(filename)
         await call.message.answer_audio(
             FSInputFile(filename),
-            caption=f"🎵 <b>{song['title'][:50]}</b>\n📦 {format_size(size)}",
-            title=song['title'][:64]
+            caption=f"🎵 <b>{song.get('title', 'Qo\'shiq')[:50]}</b>\n📦 {format_size(size)}",
+            title=song.get('title', 'Audio')[:64]
         )
         os.remove(filename)
     else:
-        await call.message.answer(f"❌ {result[:150]}")
+        await call.message.answer(f"❌ {result[:200]}")
 
-# =================== OXSHASH QO'SHIQLAR ===================
+# O'xshash qo'shiqlar
 @dp.callback_query(F.data.startswith("similar_"))
 async def similar_songs(call: CallbackQuery):
     url_hash = call.data.replace("similar_", "")
-    song = video_cache.get(url_hash)
     
+    song = cache.get_video(url_hash)
     if not song:
         await call.answer("❌ Ma'lumot topilmadi!", show_alert=True)
         return
@@ -494,7 +560,7 @@ async def similar_songs(call: CallbackQuery):
     if song.get('identified_song'):
         search_query = song['identified_song']['full_title']
     else:
-        search_query = song['title']
+        search_query = song.get('title', '')
         if ' - ' in search_query:
             search_query = search_query.split(' - ')[0]
     
@@ -518,6 +584,7 @@ async def similar_songs(call: CallbackQuery):
     for s in songs:
         song_id = hashlib.md5(s['url'].encode()).hexdigest()[:10]
         temp_data[song_id] = s
+        cache.add_song(song_id, s)
         builder.button(text=f"{s['number']}. {s['title'][:30]}", callback_data=f"dl_{song_id}")
     builder.adjust(2)
     builder.button(text="◀️ Ortga", callback_data=f"back_{url_hash}")
@@ -527,10 +594,10 @@ async def similar_songs(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("back_"))
 async def go_back(call: CallbackQuery):
     url_hash = call.data.replace("back_", "")
-    song = video_cache.get(url_hash)
+    song = cache.get_video(url_hash)
     
     if not song:
-        await call.answer("❌", show_alert=True)
+        await call.answer("❌ Ma'lumot topilmadi!", show_alert=True)
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -539,7 +606,7 @@ async def go_back(call: CallbackQuery):
     ])
     
     await call.message.edit_text(
-        f"📹 <b>{song['title'][:50]}</b>\n⏱️ {song.get('duration', '0:00')}\n\n👇 Tanlang:",
+        f"📹 <b>{song.get('title', 'Video')[:50]}</b>\n⏱️ {format_duration(song.get('duration', 0))}\n\n👇 Tanlang:",
         reply_markup=keyboard
     )
 
@@ -557,11 +624,10 @@ async def keep_alive():
 
 async def self_ping():
     await asyncio.sleep(30)
-    url = f"http://127.0.0.1:{Config.KEEP_ALIVE_PORT}"
     async with aiohttp.ClientSession() as sess:
         while bot_running:
             try:
-                await sess.get(url, timeout=5)
+                await sess.get(f"http://127.0.0.1:{Config.KEEP_ALIVE_PORT}", timeout=5)
             except:
                 pass
             await asyncio.sleep(Config.PING_INTERVAL)
@@ -572,12 +638,12 @@ async def on_startup():
     print("🚀 Bot ishga tushmoqda...")
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Webhook tozalandi")
-    
+    print(f"✅ Cache: {Config.CACHE_PATH}")
+    print(f"✅ Ma'lumotlar 24 soat saqlanadi")
     if COOKIES_AVAILABLE:
-        print("✅ YouTube cookies mavjud!")
+        print("✅ YouTube cookies mavjud")
     else:
-        print("❌ cookies.txt YO'Q! YouTube sign in xatosi chiqadi!")
-        print("   Render -> Secrets -> cookies.txt yarating")
+        print("⚠️ cookies.txt yo'q")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
