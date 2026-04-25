@@ -61,11 +61,11 @@ def check_ffmpeg():
 
 FFMPEG_AVAILABLE = check_ffmpeg()
 
-# =================== COOKIES (TO'G'RI YO'L BILAN) ===================
+# =================== COOKIES ===================
 COOKIES_PATHS = [
-    Path("/etc/secrets/cookies.txt"),  # Render Secrets
-    Path("cookies.txt"),               # Lokal papka
-    Path("/app/cookies.txt"),          # To'liq yo'l
+    Path("/etc/secrets/cookies.txt"),
+    Path("cookies.txt"),
+    Path("/app/cookies.txt"),
 ]
 
 COOKIES_FILE = None
@@ -78,16 +78,8 @@ COOKIES_AVAILABLE = COOKIES_FILE is not None
 
 if COOKIES_AVAILABLE:
     print(f"✅ Cookies topildi: {COOKIES_FILE}")
-    try:
-        with open(COOKIES_FILE, 'r') as f:
-            first_line = f.readline().strip()
-            print(f"   Format: {first_line}")
-    except:
-        pass
 else:
-    print("❌ cookies.txt topilmadi! Qidirilgan joylar:")
-    for p in COOKIES_PATHS:
-        print(f"   - {p}")
+    print("❌ cookies.txt topilmadi!")
 
 # =================== BOT ===================
 session = AiohttpSession(timeout=90)
@@ -138,9 +130,6 @@ def get_ytdlp_opts(extra=None):
     }
     if COOKIES_AVAILABLE and COOKIES_FILE:
         opts['cookiefile'] = COOKIES_FILE
-        print(f"🍪 Cookies ishlatilmoqda: {COOKIES_FILE}")
-    else:
-        print("⚠️ Cookies YO'Q!")
     if extra:
         opts.update(extra)
     return opts
@@ -262,8 +251,8 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
 # =================== BOT ===================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    cookie_status = "✅ Bor" if COOKIES_AVAILABLE else "❌ Yo'q"
-    shazam_status = "✅ Bor" if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE else "❌ Yo'q"
+    cookie_status = "Yes" if COOKIES_AVAILABLE else "No"
+    shazam_status = "Yes" if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE else "No"
     
     await message.answer(
         f"🎵 <b>MP3 Bot</b>\n\n"
@@ -278,6 +267,7 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
+    cookie_status = "Yes" if COOKIES_AVAILABLE else "No"
     await message.answer(
         "📖 <b>Yordam</b>\n\n"
         "1. Instagram/TikTok/Facebook video yuboring\n"
@@ -285,7 +275,7 @@ async def cmd_help(message: Message):
         "   → MP3 yuklash va oʻxshash qoʻshiqlar\n\n"
         "2. Qoʻshiq nomi yozing: qidiruv natijalari\n\n"
         "3. YouTube linki: MP3 yuklash\n\n"
-        f"🍪 Cookies: {'✅ Mavjud' if COOKIES_AVAILABLE else '❌ Yo\\'q'}"
+        f"🍪 Cookies: {cookie_status}"
     )
 
 @dp.message(F.text)
@@ -324,7 +314,7 @@ async def handle_youtube(message: Message, url: str, user_id: int):
         reply_markup=keyboard
     )
 
-# ========== INSTAGRAM/TIKTOK/FACEBOOK (SHAZAM BILAN) ==========
+# ========== INSTAGRAM/TIKTOK/FACEBOOK ==========
 async def handle_social_video(message: Message, url: str, user_id: int, platform: str):
     status = await message.answer("⏳ Video yuklanmoqda (1-2 daqiqa)...")
     filename, title, duration = await download_video(url, user_id)
@@ -337,14 +327,12 @@ async def handle_social_video(message: Message, url: str, user_id: int, platform
     file_size = os.path.getsize(filename)
     url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
     
-    # Shazam aniqlash
     identified_song = None
     if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE:
         detect_msg = await message.answer("🎵 Shazam: videodagi qoʻshiq aniqlanmoqda...")
         identified_song = await identify_audio_from_video(filename)
         await detect_msg.delete()
     
-    # Ma'lumotni saqlash
     video_cache[url_hash] = {
         'url': url,
         'title': title,
@@ -353,7 +341,6 @@ async def handle_social_video(message: Message, url: str, user_id: int, platform
         'identified_song': identified_song
     }
     
-    # Tugmalar
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{url_hash}")],
         [InlineKeyboardButton(text="🔍 Oʻxshash qoʻshiqlar", callback_data=f"similar_{url_hash}")]
