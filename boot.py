@@ -30,10 +30,8 @@ import aiohttp
 try:
     from shazamio import Shazam
     SHAZAM_AVAILABLE = True
-    print("✅ Shazamio o‘rnatilgan!")
 except ImportError:
     SHAZAM_AVAILABLE = False
-    print("⚠️ Shazamio o‘rnatilmagan! Audio aniqlash ishlamaydi.")
 
 # =================== KONFIG ===================
 load_dotenv()
@@ -45,6 +43,7 @@ class Config:
     MAX_FILE_SIZE = 50 * 1024 * 1024
     AUDIO_SAMPLE_DURATION = 15
     KEEP_ALIVE_PORT = int(os.getenv("PORT", "8080"))
+    PING_INTERVAL = 300
 
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
@@ -61,12 +60,34 @@ def check_ffmpeg():
         return False
 
 FFMPEG_AVAILABLE = check_ffmpeg()
-if not FFMPEG_AVAILABLE:
-    print("⚠️ FFmpeg topilmadi! Audio aniqlash ishlamaydi.")
 
-# =================== COOKIES ===================
-COOKIES_FILE = "cookies.txt"
-COOKIES_AVAILABLE = os.path.exists(COOKIES_FILE)
+# =================== COOKIES (TO'G'RI YO'L BILAN) ===================
+COOKIES_PATHS = [
+    Path("/etc/secrets/cookies.txt"),  # Render Secrets
+    Path("cookies.txt"),               # Lokal papka
+    Path("/app/cookies.txt"),          # To'liq yo'l
+]
+
+COOKIES_FILE = None
+for path in COOKIES_PATHS:
+    if path.exists():
+        COOKIES_FILE = str(path)
+        break
+
+COOKIES_AVAILABLE = COOKIES_FILE is not None
+
+if COOKIES_AVAILABLE:
+    print(f"✅ Cookies topildi: {COOKIES_FILE}")
+    try:
+        with open(COOKIES_FILE, 'r') as f:
+            first_line = f.readline().strip()
+            print(f"   Format: {first_line}")
+    except:
+        pass
+else:
+    print("❌ cookies.txt topilmadi! Qidirilgan joylar:")
+    for p in COOKIES_PATHS:
+        print(f"   - {p}")
 
 # =================== BOT ===================
 session = AiohttpSession(timeout=90)
@@ -115,41 +136,40 @@ def get_ytdlp_opts(extra=None):
         'socket_timeout': 30,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     }
-    if COOKIES_AVAILABLE:
+    if COOKIES_AVAILABLE and COOKIES_FILE:
         opts['cookiefile'] = COOKIES_FILE
+        print(f"🍪 Cookies ishlatilmoqda: {COOKIES_FILE}")
+    else:
+        print("⚠️ Cookies YO'Q!")
     if extra:
         opts.update(extra)
     return opts
 
 # =================== SHAZAM AUDIO ANIQLASH ===================
 async def identify_audio_from_video(video_path: str) -> Optional[dict]:
-    """Shazam orqali video ichidagi qo'shiqni aniqlaydi"""
     if not SHAZAM_AVAILABLE or not shazam or not FFMPEG_AVAILABLE:
         return None
     
     try:
         audio_path = str(Config.TEMP_PATH / f"sample_{int(time.time())}.mp3")
         
-        # Videodan audio kesib olish
         cmd = [
             'ffmpeg', '-i', video_path,
-            '-ss', '5',  # 5-soniyadan boshlab
-            '-t', str(Config.AUDIO_SAMPLE_DURATION),  # 15 soniya
+            '-ss', '5',
+            '-t', str(Config.AUDIO_SAMPLE_DURATION),
             '-q:a', '0',
             '-map', 'a',
             audio_path,
             '-y'
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if not os.path.exists(audio_path):
             return None
         
-        # Shazam orqali aniqlash
         shazam_result = await shazam.recognize(audio_path)
         
-        # Tozalash
         if os.path.exists(audio_path):
             os.remove(audio_path)
         
@@ -160,7 +180,6 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
                 'artist': track.get('subtitle', ''),
                 'full_title': f"{track.get('subtitle', '')} - {track.get('title', '')}",
             }
-        
         return None
     except Exception as e:
         logging.error(f"Audio aniqlash xatosi: {e}")
@@ -206,7 +225,10 @@ async def download_mp3(url: str, user_id: int):
                 filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
                 return filename, info.get('title', 'Audio')
         except Exception as e:
-            return None, str(e)
+            error_msg = str(e)
+            if "Sign in to confirm" in error_msg:
+                error_msg = "❌ YouTube botni aniqladi! Admin cookies.txt ni yangilashi kerak."
+            return None, error_msg
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
 async def search_songs(query: str, limit: int = 10) -> List[dict]:
@@ -240,26 +262,30 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
 # =================== BOT ===================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    shazam_status = "✅ Mavjud" if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE else "❌ Yoq"
+    cookie_status = "✅ Bor" if COOKIES_AVAILABLE else "❌ Yo'q"
+    shazam_status = "✅ Bor" if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE else "❌ Yo'q"
+    
     await message.answer(
         f"🎵 <b>MP3 Bot</b>\n\n"
         f"📥 Instagram/TikTok/Facebook video yuboring:\n"
         f"→ Video ichidagi qoʻshiq Shazam orqali aniqlanadi\n"
-        f"→ MP3 yuklash + oʻxshash qoʻshiqlar tugmasi chiqadi\n\n"
+        f"→ MP3 yuklash + oʻxshash qoʻshiqlar tugmasi\n\n"
         f"🔍 Qoʻshiq nomi yozing: <code>Shohruhxon</code>\n\n"
-        f"🎬 YouTube linki yuboring: MP3 yuklash tugmasi\n\n"
+        f"🎬 YouTube linki: MP3 yuklash\n\n"
+        f"🍪 Cookies: {cookie_status}\n"
         f"🎧 Shazam: {shazam_status}"
     )
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "📖 Yordam\n\n"
+        "📖 <b>Yordam</b>\n\n"
         "1. Instagram/TikTok/Facebook video yuboring\n"
         "   → Shazam qoʻshiqni aniqlaydi\n"
         "   → MP3 yuklash va oʻxshash qoʻshiqlar\n\n"
         "2. Qoʻshiq nomi yozing: qidiruv natijalari\n\n"
-        "3. YouTube linki: MP3 yuklash"
+        "3. YouTube linki: MP3 yuklash\n\n"
+        f"🍪 Cookies: {'✅ Mavjud' if COOKIES_AVAILABLE else '❌ Yo\\'q'}"
     )
 
 @dp.message(F.text)
@@ -270,13 +296,12 @@ async def handle_message(message: Message):
     if re.match(r'^https?://', text):
         platform = get_platform(text)
         if platform == 'other':
-            await message.answer("�️ Faqat YouTube, Instagram, TikTok, Facebook linklari!")
+            await message.answer("❌ Faqat YouTube, Instagram, TikTok, Facebook linklari!")
             return
         
         if platform == 'youtube':
             await handle_youtube(message, text, user_id)
         else:
-            # Instagram, TikTok, Facebook -> video + Shazam + tugmalar
             await handle_social_video(message, text, user_id, platform)
     else:
         await process_search(message, text, user_id)
@@ -295,7 +320,7 @@ async def handle_youtube(message: Message, url: str, user_id: int):
     ])
     
     await message.answer(
-        f"🎬 YouTube\n👇 MP3 yuklash uchun tugmani bosing:",
+        f"🎬 <b>YouTube</b>\n👇 MP3 yuklash uchun tugmani bosing:",
         reply_markup=keyboard
     )
 
@@ -312,7 +337,7 @@ async def handle_social_video(message: Message, url: str, user_id: int, platform
     file_size = os.path.getsize(filename)
     url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
     
-    # ========== SHAZAM ANIQLASH ==========
+    # Shazam aniqlash
     identified_song = None
     if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE:
         detect_msg = await message.answer("🎵 Shazam: videodagi qoʻshiq aniqlanmoqda...")
@@ -340,7 +365,7 @@ async def handle_social_video(message: Message, url: str, user_id: int, platform
     if identified_song:
         caption += f"\n\n🎯 <b>Shazam topdi:</b> {identified_song['full_title'][:70]}"
     else:
-        caption += "\n\n⚠️ Qoʻshiq aniqlanmadi (audio sifati yoki Shazam xatosi)"
+        caption += "\n\n⚠️ Qoʻshiq aniqlanmadi"
     
     await message.answer_video(FSInputFile(filename), caption=caption, reply_markup=keyboard)
     os.remove(filename)
@@ -352,7 +377,7 @@ async def process_search(message: Message, query: str, user_id: int):
     await status.delete()
     
     if not songs:
-        await message.answer("❌ Hech narsa topilmadi.")
+        await message.answer("❌ Hech narsa topilmadi!")
         return
     
     result = f"🎵 <b>{query}</b>\n\n"
@@ -427,7 +452,6 @@ async def similar_songs(call: CallbackQuery):
     
     await call.answer("🔍")
     
-    # Qidiruv so'zini aniqlash
     if song.get('identified_song') and song['identified_song'].get('full_title'):
         search_query = song['identified_song']['full_title']
         source = "Shazam"
@@ -483,23 +507,25 @@ async def go_back(call: CallbackQuery):
 # ========== KEEP-ALIVE ==========
 async def keep_alive():
     async def handler(reader, writer):
-        writer.write(b"HTTP/1.1 200 OK\r\n\r\nalive")
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nalive")
         await writer.drain()
         writer.close()
+    
     server = await asyncio.start_server(handler, '0.0.0.0', Config.KEEP_ALIVE_PORT)
-    print(f"🟢 Keep-alive: {Config.KEEP_ALIVE_PORT}")
+    print(f"🟢 Keep-alive server: 0.0.0.0:{Config.KEEP_ALIVE_PORT}")
     async with server:
         await server.serve_forever()
 
 async def self_ping():
     await asyncio.sleep(30)
+    url = f"http://127.0.0.1:{Config.KEEP_ALIVE_PORT}"
     async with aiohttp.ClientSession() as sess:
         while bot_running:
             try:
-                await sess.get(f"http://127.0.0.1:{Config.KEEP_ALIVE_PORT}", timeout=5)
+                await sess.get(url, timeout=5)
             except:
                 pass
-            await asyncio.sleep(300)
+            await asyncio.sleep(Config.PING_INTERVAL)
 
 # ========== STARTUP ==========
 @dp.startup()
@@ -507,14 +533,16 @@ async def on_startup():
     print("🚀 Bot ishga tushmoqda...")
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Webhook tozalandi")
+    
     if COOKIES_AVAILABLE:
-        print("✅ YouTube cookies mavjud")
+        print(f"✅ Cookies mavjud: {COOKIES_FILE}")
     else:
-        print("⚠️ cookies.txt yo‘q")
+        print("❌ cookies.txt TOPILMADI!")
+    
     if SHAZAM_AVAILABLE and FFMPEG_AVAILABLE:
         print("✅ Shazam audio aniqlash tayyor")
     else:
-        print("⚠️ Shazam ishlamaydi: Shazam yoki FFmpeg yo‘q")
+        print("⚠️ Shazam ishlamaydi")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
@@ -526,6 +554,7 @@ async def main():
 
 def signal_handler(sig, frame):
     global bot_running
+    print("\n⏹️ To'xtatilmoqda...")
     bot_running = False
     sys.exit(0)
 
@@ -536,4 +565,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("To‘xtatildi.")
+        print("To'xtatildi.")
