@@ -21,3 +21,6 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+BOT_TOKEN=8635542257:AAFZCj88gEJGeMcE-VOqvVu_worhpeZs14c
+FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
+ADMIN_IDS=2010030869
