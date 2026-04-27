@@ -8,6 +8,7 @@ import subprocess
 import signal
 import sys
 import shutil
+import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -57,18 +58,94 @@ class SongData:
     artist: str = ""
     platform: str = 'youtube'
 
+# =================== COOKIE QO'LLAB-QUVVATLASH ===================
+COOKIES_PATH = Path("/app/cookies.txt")
+
+def get_cookie_file():
+    """Cookie faylni topish - 4 xil usul"""
+    
+    # 1. Local fayl (GitHub repo dagi)
+    if Path("cookies.txt").exists():
+        print("✅ Local cookies.txt topildi")
+        return str(Path("cookies.txt"))
+    
+    # 2. /app/cookies.txt (Railway da)
+    if COOKIES_PATH.exists():
+        print("✅ /app/cookies.txt topildi")
+        return str(COOKIES_PATH)
+    
+    # 3. Base64 dan (COOKIE_BASE64)
+    cookie_b64 = os.getenv("COOKIE_BASE64")
+    if cookie_b64:
+        try:
+            cookie_content = base64.b64decode(cookie_b64).decode('utf-8')
+            cookie_path = Config.DOWNLOADS_PATH / "cookies.txt"
+            cookie_path.write_text(cookie_content)
+            print("✅ Cookie base64 dan yuklandi")
+            return str(cookie_path)
+        except Exception as e:
+            print(f"⚠️ Base64 xato: {e}")
+    
+    # 4. To'g'ridan-to'g'ri matndan (COOKIE_CONTENT)
+    cookie_env = os.getenv("COOKIE_CONTENT")
+    if cookie_env:
+        try:
+            cookie_path = Config.DOWNLOADS_PATH / "cookies.txt"
+            cookie_path.write_text(cookie_env)
+            print("✅ Cookie env dan yuklandi")
+            return str(cookie_path)
+        except Exception as e:
+            print(f"⚠️ Env xato: {e}")
+    
+    print("⚠️ Cookie topilmadi - YouTube ba'zi videolar ishlamasligi mumkin")
+    return None
+
+COOKIE_FILE = get_cookie_file()
+
+def get_ydl_opts(extra=None):
+    """yt-dlp sozlamalari - cookie bilan"""
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'geo_bypass': True,
+        'retries': 10,
+        'sleep_interval': 5,
+        'max_sleep_interval': 10,
+        'extractor_retries': 5,
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web'],
+                'skip': ['hls', 'dash'],
+                'player_skip': ['webpage', 'configs'],
+            }
+        }
+    }
+    
+    # Cookie qo'shish
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        opts['cookiefile'] = COOKIE_FILE
+        print(f"🍪 Cookie ishlatilmoqda: {COOKIE_FILE}")
+    
+    if extra:
+        opts.update(extra)
+    return opts
+
 # =================== INITIALIZATION ===================
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True)
 Config.TEMP_PATH.mkdir(exist_ok=True)
 
-session = AiohttpSession(timeout=60)
+session = AiohttpSession(timeout=120)
 bot = Bot(
     token=Config.BOT_TOKEN, 
     session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
-pool = ThreadPoolExecutor(max_workers=3)
+pool = ThreadPoolExecutor(max_workers=2)
 
 temp_data: Dict[str, SongData] = {}
 video_cache: Dict[str, dict] = {}
@@ -102,9 +179,9 @@ def format_duration(seconds):
 def format_size(bytes_size: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB']:
         if bytes_size < 1024:
-            return f"{bytes_size:.1f} {unit}"
+            return f"{bytes_size:.1f}{unit}"
         bytes_size /= 1024
-    return f"{bytes_size:.1f} TB"
+    return f"{bytes_size:.1f}TB"
 
 def extract_artist_title(full_title: str):
     if not full_title:
@@ -123,20 +200,7 @@ def extract_artist_title(full_title: str):
         title = full_title.strip()
     
     clean_title = title
-    clean_title = re.sub(r'\(.*?\)', '', clean_title)
-    clean_title = re.sub(r'\[.*?\]', '', clean_title)
-    
-    remove_words = [
-        'Official Video', 'Official Music Video', 'Official Audio',
-        'MV', 'M/V', 'Music Video', 'Lyrics',
-        'HD', '4K', '1080p', '720p',
-        'TikTok', 'Trend', 'Viral', '2024', '2025', '2026',
-        'Cover', 'AI Cover', 'Remix',
-    ]
-    
-    for word in remove_words:
-        clean_title = re.sub(re.escape(word), '', clean_title, flags=re.IGNORECASE)
-    
+    clean_title = re.sub(r'\(.*?\)|\[.*?\]|Official.*|MV|Music Video|Lyrics|HD|4K|Cover|Remix', '', clean_title, flags=re.IGNORECASE)
     clean_title = re.sub(r'\s+', ' ', clean_title).strip()
     clean_artist = re.sub(r'\(.*?\)|\[.*?\]', '', artist).strip()
     clean_artist = re.sub(r'\s+', ' ', clean_artist).strip()
@@ -144,7 +208,7 @@ def extract_artist_title(full_title: str):
     if not clean_title or len(clean_title) < 3:
         clean_title = title.strip()
     
-    return clean_artist, clean_title
+    return clean_artist[:30], clean_title[:50]
 
 # =================== AUDIO ANIQLASH ===================
 async def identify_audio_from_video(video_path: str) -> Optional[dict]:
@@ -190,60 +254,61 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
 # =================== VIDEO YUKLASH ===================
 async def download_video(url: str, user_id: int):
     def run():
-        try:
-            opts = {
-                'outtmpl': str(Config.DOWNLOADS_PATH / f"video_{user_id}_%(title)s.%(ext)s"),
-                'format': 'best[height<=720][ext=mp4]/best[ext=mp4]',
-                'quiet': True,
-                'no_warnings': True,
-                'retries': 3,
-                'socket_timeout': 30,
-                'merge_output_format': 'mp4',
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                
-                if not os.path.exists(filename):
-                    base = filename.rsplit('.', 1)[0]
-                    for ext in ['.mp4', '.webm', '.mkv']:
-                        test_path = base + ext
-                        if os.path.exists(test_path):
-                            filename = test_path
-                            break
-                
-                full_title = info.get('title', 'Video')
-                duration = info.get('duration', 0)
-                return filename, full_title, duration
-        except Exception as e:
-            return None, str(e), 0
+        for attempt in range(3):
+            try:
+                opts = get_ydl_opts({
+                    'outtmpl': str(Config.DOWNLOADS_PATH / f"v_{user_id}_{int(time.time())}_{attempt}_%(title)s.%(ext)s"),
+                    'format': 'best[height<=480][ext=mp4]/best[ext=mp4]'
+                })
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+                    
+                    if not os.path.exists(filename):
+                        base = filename.rsplit('.', 1)[0]
+                        for ext in ['.mp4', '.webm', '.mkv']:
+                            test_path = base + ext
+                            if os.path.exists(test_path):
+                                filename = test_path
+                                break
+                    
+                    full_title = info.get('title', 'Video')
+                    duration = info.get('duration', 0)
+                    return filename, full_title, duration
+            except Exception as e:
+                err = str(e)
+                if attempt == 2:
+                    return None, err, 0
+                time.sleep(3)
+        return None, "Noma'lum xato", 0
     
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
 # =================== MP3 YUKLASH ===================
 async def download_mp3(url: str, user_id: int):
     def run():
-        try:
-            opts = {
-                'outtmpl': str(Config.DOWNLOADS_PATH / f"audio_{user_id}_%(title)s.%(ext)s"),
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': True,
-                'no_warnings': True,
-                'retries': 3,
-                'socket_timeout': 30,
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
-                title = info.get('title', 'Audio')
-                return filename, title
-        except Exception as e:
-            return None, str(e)
+        for attempt in range(3):
+            try:
+                opts = get_ydl_opts({
+                    'outtmpl': str(Config.DOWNLOADS_PATH / f"a_{user_id}_{int(time.time())}_{attempt}_%(title)s.%(ext)s"),
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                })
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
+                    title = info.get('title', 'Audio')
+                    return filename, title
+            except Exception as e:
+                err = str(e)
+                if attempt == 2:
+                    return None, err
+                time.sleep(3)
+        return None, "Noma'lum xato"
     
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
@@ -251,11 +316,7 @@ async def download_mp3(url: str, user_id: int):
 async def search_songs(query: str, limit: int = 10) -> List[dict]:
     def run():
         try:
-            opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True,
-            }
+            opts = get_ydl_opts({'extract_flat': True})
             search_query = f"ytsearch{limit}:{query}"
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_query, download=False)
@@ -274,7 +335,8 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
                                 'url': f"https://youtube.com/watch?v={item.get('id', '')}",
                             })
                 return songs
-        except:
+        except Exception as e:
+            print(f"Qidiruv xatosi: {e}")
             return []
     
     return await asyncio.get_event_loop().run_in_executor(pool, run)
@@ -283,12 +345,9 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
-        "🎵 <b>Zurnavolar Bot</b> 🎵\n\n"
-        "📥 <b>Link yuboring:</b>\n"
-        "YouTube | Instagram | TikTok | Facebook\n\n"
-        "🔍 <b>Qo'shiq qidirish:</b>\n"
-        "Masalan: yalla, shoxruxon\n\n"
-        "/help - Yordam\n\n"
+        "🎵 <b>Zurnavolar Bot</b>\n\n"
+        "📥 Link yuboring\n"
+        "🔍 Qo'shiq nomi yozing\n\n"
         "@zurnavolarbot"
     )
 
@@ -296,12 +355,9 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     await message.answer(
         "📖 <b>Yordam</b>\n\n"
-        "🎵 <b>Qanday ishlatiladi?</b>\n"
-        "1. YouTube/Instagram/TikTok/Facebook linkini yuboring\n"
-        "2. Qo'shiq nomini yozib qidiring\n\n"
-        "⚙️ <b>Buyruqlar:</b>\n"
-        "/start - Boshlash\n"
-        "/help - Yordam\n\n"
+        "🎯 YouTube/Instagram/TikTok/Facebook linki\n"
+        "🔍 Qo'shiq nomi yozing\n"
+        "🎵 MP3: 192kbps\n\n"
         "@zurnavolarbot"
     )
 
@@ -312,19 +368,26 @@ async def handle_message(message: Message):
     
     if re.match(r'^https?://', text):
         await process_url(message, text, user_id)
-    else:
+    elif len(text) >= 2:
         await process_search(message, text, user_id)
+    else:
+        await message.answer("❌ Kamida 2 harf yoki link")
 
 async def process_url(message: Message, url: str, user_id: int):
     platform = get_platform(url)
     
     if platform == 'other':
-        await message.answer("❌ Faqat YouTube, Instagram, TikTok, Facebook linklari!")
+        await message.answer("❌ Faqat YouTube, Instagram, TikTok, Facebook")
         return
     
     status = await message.answer("⏳ Yuklanmoqda...")
     
-    filename, full_title, duration = await download_video(url, user_id)
+    try:
+        filename, full_title, duration = await asyncio.wait_for(download_video(url, user_id), timeout=90)
+    except asyncio.TimeoutError:
+        await status.delete()
+        await message.answer("❌ Vaqt tugadi")
+        return
     
     await status.delete()
     
@@ -336,7 +399,7 @@ async def process_url(message: Message, url: str, user_id: int):
             os.remove(filename)
             return
         
-        url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
         artist, title = extract_artist_title(full_title)
         
         identified_song = None
@@ -390,7 +453,6 @@ async def process_search(message: Message, query: str, user_id: int):
         await message.answer("❌ Topilmadi")
         return
     
-    # Qo'shiqlar orasida bo'sh qator YO'Q
     result = f"🔍 {query}\n\n"
     for s in songs:
         if s['artist']:
@@ -427,7 +489,13 @@ async def mp3_from_video(call: CallbackQuery):
     display_title = video_info.get('identified_song', {}).get('full_title', video_info['title'])[:40]
     status = await call.message.answer(f"⏳ {display_title}...")
     
-    filename, title = await download_mp3(video_info['url'], call.from_user.id)
+    try:
+        filename, title = await asyncio.wait_for(download_mp3(video_info['url'], call.from_user.id), timeout=90)
+    except asyncio.TimeoutError:
+        await status.delete()
+        await call.message.answer("❌ Vaqt tugadi")
+        return
+    
     await status.delete()
     
     if filename and os.path.exists(filename):
@@ -511,7 +579,13 @@ async def download_selected(call: CallbackQuery):
     await call.answer("⏳")
     status = await call.message.answer(f"⏳ {song_data.title[:35]}...")
     
-    filename, title = await download_mp3(song_data.url, call.from_user.id)
+    try:
+        filename, title = await asyncio.wait_for(download_mp3(song_data.url, call.from_user.id), timeout=90)
+    except asyncio.TimeoutError:
+        await status.delete()
+        await call.message.answer("❌ Vaqt tugadi")
+        return
+    
     await status.delete()
     
     if filename and os.path.exists(filename):
@@ -566,12 +640,11 @@ async def self_ping():
                 pass
             await asyncio.sleep(Config.PING_INTERVAL)
 
-# =================== MAIN (CONFLICT HAL QILINGAN) ===================
+# =================== MAIN ===================
 async def main():
     global bot_running
     logging.basicConfig(level=logging.INFO)
     
-    # FORCE webhook tozalash - conflict xatosini hal qilish
     print("🔄 Webhook tozalanmoqda...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
@@ -583,6 +656,8 @@ async def main():
     
     if os.getenv("RAILWAY_ENVIRONMENT"):
         print("🚂 Railway muhiti")
+    
+    print(f"🍪 Cookie holati: {'✅ Mavjud' if COOKIE_FILE else '❌ Yoq'}")
     
     try:
         bot_info = await bot.get_me()
@@ -599,7 +674,6 @@ async def main():
     asyncio.create_task(keep_alive_server())
     asyncio.create_task(self_ping())
     
-    # Polling - skip_updates=True conflict oldini oladi
     while bot_running:
         try:
             print("🚀 Bot ishga tushdi...")
