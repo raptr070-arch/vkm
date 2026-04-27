@@ -4,8 +4,6 @@ RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
 
 WORKDIR /app
 
-# Cookie faylni nusxalash
-COPY cookies.txt .
 
 # Tekshirish (ixtiyoriy)
 RUN ls -la cookies.txt && head -n 3 cookies.txt
