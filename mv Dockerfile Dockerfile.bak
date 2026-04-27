@@ -1,4 +1,0 @@
-echo "cookies.txt" > .dockerignore
-git add .dockerignore
-git commit -m "Ignore cookies.txt in Docker"
-git push
