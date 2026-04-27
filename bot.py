@@ -85,7 +85,7 @@ COOKIE_FILE = get_cookie_content()
 if COOKIE_FILE:
     print("✅ Cookie yuklandi")
 else:
-    print("⚠️ Cookie topilmadi")
+    print("⚠️ Cookie topilmadi - ba'zi videolar yuklanmasligi mumkin")
 
 def get_ydl_opts(extra=None):
     opts = {
@@ -99,7 +99,7 @@ def get_ydl_opts(extra=None):
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios'],
+                'player_client': ['android', 'ios', 'web'],
                 'skip': ['hls', 'dash'],
             }
         }
@@ -145,16 +145,21 @@ def clean_title(full: str):
     else:
         a, t = "", full
     
-    # TUZATILGAN QATORLAR
-    t = re.sub(r'\([^)]*\)|\[[^\]]*\]|Official|MV|Music Video|Lyrics|HD|4K|Cover|Remix|Video', '', t, flags=re.I)
-    t = re.sub(r'\s+', ' ', t).strip()
-    a = re.sub(r'\([^)]*\)|\[[^\]]*\]', '', a).strip()
+    # To'liq nom - faqat haddan tashqari uzun bo'lsa kesish
+    t = t.strip()
+    a = a.strip()
     
-    if len(t) > 50:
-        t = t[:47] + "..."
-    if len(a) > 30:
-        a = a[:27] + "..."
-    return (a[:30], t[:50]) if a else ("", t[:50])
+    # Official, MV, Lyrics kabi so'zlarni tozalash
+    t = re.sub(r'\s*\([^)]*Official[^)]*\)\s*', ' ', t, flags=re.I)
+    t = re.sub(r'\s*\[[^\]]*\]\s*', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    
+    if len(t) > 80:
+        t = t[:77] + "..."
+    if len(a) > 40:
+        a = a[:37] + "..."
+    
+    return (a, t) if a else ("", t)
 
 async def download_video(url: str, uid: int):
     def run():
@@ -221,7 +226,9 @@ async def search_songs(q: str, limit: int = 10) -> List[dict]:
                     if item and item.get('id'):
                         a, t = clean_title(item.get('title', ''))
                         songs.append({
-                            'n': i, 't': t, 'a': a,
+                            'n': i,
+                            't': t,
+                            'a': a,
                             'd': format_duration(item.get('duration', 0)),
                             'u': f"https://youtube.com/watch?v={item['id']}"
                         })
@@ -253,6 +260,7 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
     except:
         return None
 
+# =================== HANDLERS ===================
 @dp.message(CommandStart())
 async def start(m: Message):
     await m.answer(
@@ -349,12 +357,13 @@ async def process_search(m: Message, q: str):
         await m.answer("❌ Topilmadi")
         return
     
+    # QO'SHIQLAR ORASIDA BO'SH QATOR YO'Q - BIR-BIRIGA YOPISHIB
     result = f"🔍 {q}\n\n"
     for s in songs:
         if s['a']:
-            result += f"{s['n']}. {s['a']} - {s['t']}\n   {s['d']}\n\n"
+            result += f"{s['n']}. {s['a']} - {s['t']} {s['d']}\n"
         else:
-            result += f"{s['n']}. {s['t']}\n   {s['d']}\n\n"
+            result += f"{s['n']}. {s['t']} {s['d']}\n"
     
     builder = InlineKeyboardBuilder()
     for s in songs:
@@ -364,10 +373,11 @@ async def process_search(m: Message, q: str):
     builder.adjust(5)
     
     await m.answer(
-        f"{result}👇 <b>Raqamni bosing</b>\n\n❤️ @zurnavolarbot",
+        f"{result}\n👇 <b>Raqamni bosing</b>\n\n❤️ @zurnavolarbot",
         reply_markup=builder.as_markup()
     )
 
+# =================== CALLBACKS ===================
 @dp.callback_query(F.data.startswith("mp3_"))
 async def get_mp3(call: CallbackQuery):
     info = video_cache.get(call.data.replace("mp3_", ""))
@@ -412,9 +422,9 @@ async def similar(call: CallbackQuery):
     result = f"🔍 {info['search'][:35]}\n\n"
     for i, s in enumerate(songs[:10], 1):
         if s['a']:
-            result += f"{i}. {s['a']} - {s['t']}\n   {s['d']}\n\n"
+            result += f"{i}. {s['a']} - {s['t']} {s['d']}\n"
         else:
-            result += f"{i}. {s['t']}\n   {s['d']}\n\n"
+            result += f"{i}. {s['t']} {s['d']}\n"
     
     builder = InlineKeyboardBuilder()
     for i, s in enumerate(songs[:10], 1):
@@ -424,7 +434,7 @@ async def similar(call: CallbackQuery):
     builder.adjust(5)
     
     await call.message.answer(
-        f"{result}━━━━━━━━━━━━━━━━\n🔍 {len(songs)} ta versiya\n━━━━━━━━━━━━━━━━\n👇 Raqamni bosing\n\n❤️ @zurnavolarbot",
+        f"{result}\n━━━━━━━━━━━━━━━━\n🔍 {len(songs)} ta versiya\n━━━━━━━━━━━━━━━━\n👇 Raqamni bosing\n\n❤️ @zurnavolarbot",
         reply_markup=builder.as_markup()
     )
 
@@ -461,6 +471,7 @@ async def err(e, ex):
     logging.error(f"Xato: {ex}")
     return True
 
+# =================== KEEP-ALIVE ===================
 async def keep_alive():
     async def h(r, w):
         try:
@@ -487,10 +498,12 @@ async def self_ping():
                 pass
             await asyncio.sleep(300)
 
+# =================== MAIN ===================
 async def main():
     global bot_running
     logging.basicConfig(level=logging.INFO)
     
+    # Webhook tozalash - conflict xatosini hal qilish
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook tozalandi")
@@ -501,27 +514,34 @@ async def main():
     
     try:
         me = await bot.get_me()
-        print("=" * 35)
+        print("=" * 40)
         print(f"🎵 Zurnavolar: @{me.username}")
+        print(f"🆔 ID: {me.id}")
         print(f"🍪 Cookie: {'✅' if COOKIE_FILE else '❌'}")
         print(f"🎬 FFmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}")
-        print("=" * 35)
-    except:
-        pass
+        print("=" * 40)
+    except Exception as e:
+        print(f"❌ Bot info: {e}")
     
     asyncio.create_task(keep_alive())
     asyncio.create_task(self_ping())
     
     while bot_running:
         try:
-            print("🚀 Bot ishga tushdi")
-            await dp.start_polling(bot, allowed_updates=['message', 'callback_query'], skip_updates=True)
+            print("🚀 Bot polling boshlandi...")
+            await dp.start_polling(
+                bot, 
+                allowed_updates=['message', 'callback_query'],
+                skip_updates=True
+            )
         except Exception as e:
-            if "Conflict" in str(e):
-                print("⚠️ Conflict - 5s")
+            err = str(e)
+            if "Conflict" in err:
+                print("⚠️ Conflict xatosi - 5 soniya keyin qayta urinish...")
+                await asyncio.sleep(5)
             else:
-                print(f"❌ {e} - 5s")
-            await asyncio.sleep(5)
+                print(f"❌ Xato: {e} - 5 soniya keyin")
+                await asyncio.sleep(5)
 
 def signal_handler(sig, frame):
     global bot_running
