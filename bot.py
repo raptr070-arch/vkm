@@ -266,7 +266,7 @@ async def start(m: Message):
         "🎵 <b>Zurnavolar Bot</b>\n\n"
         "📥 Link yuboring (YouTube|Instagram|TikTok|Facebook)\n"
         "🔍 Qo'shiq nomi yozing\n"
-        "⏱️ Faqat 10 daqiqagacha\n\n"
+        " Oson vediyo yukla\n\n"
         "@zurnavolarbot"
     )
 
