@@ -1,5 +1,5 @@
 aiogram
 yt-dlp
 python-dotenv
-shazamio
+shazamio==0.5.2
 aiohttp
