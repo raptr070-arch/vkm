@@ -4,13 +4,16 @@ RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
 
 WORKDIR /app
 
-# ========== COOKIE FAYLINI NUSXALASH ==========
+# Cookie faylni nusxalash
+COPY cookies.txt .
 
-# Tekshirish
+# Tekshirish (ixtiyoriy)
 RUN ls -la cookies.txt && head -n 3 cookies.txt
 
+# Qolgan fayllar
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
+
+COPY bot.py .
 
 CMD ["python", "bot.py"]
