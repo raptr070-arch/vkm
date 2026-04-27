@@ -1,8 +1,11 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "python311"]
+nixPkgs = ["ffmpeg", "python311", "curl"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
+
+[phases.postInstall]
+cmds = ["curl -o cookies.txt https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/yt_dlp/extractor/youtube/cookies.txt || echo 'cookies not found'"]
 
 [start]
 cmd = "python bot.py"
