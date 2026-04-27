@@ -229,14 +229,6 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
     except:
         return None
 
-# =================== KLAVIATURALAR ===================
-def make_keyboard(buttons: List[str], row_width: int = 2) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for btn in buttons:
-        builder.button(text=btn, callback_data=btn.lower().replace(' ', '_'))
-    builder.adjust(row_width)
-    return builder.as_markup()
-
 # =================== HANDLERS ===================
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -321,13 +313,14 @@ async def process_url(message: Message, url: str):
         cap += f"\n🎯 {identified['full_title'][:40]}"
     cap += "\n\n❤️ @zurnavolarbot"
     
-    btn = InlineKeyboardMarkup(inline_keyboard=[
+    # TUZATILGAN TUGMALAR - callback_data to'g'ri formatda
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{hid}")],
-        [InlineKeyboardButton(text="🔍 Oxshash", callback_data=f="sim_{hid}")]
+        [InlineKeyboardButton(text="🔍 Oxshash", callback_data=f"sim_{hid}")]
     ])
     
     try:
-        await message.answer_video(FSInputFile(filename), caption=cap, reply_markup=btn)
+        await message.answer_video(FSInputFile(filename), caption=cap, reply_markup=keyboard)
     except:
         await message.answer_video(FSInputFile(filename), caption=cap[:200])
     
@@ -350,6 +343,7 @@ async def process_search(message: Message, query: str):
         else:
             result += f"{s['num']}. {s['title']}\n   ⏱ {s['duration']}\n\n"
     
+    # TUGMALAR FAQAT RAQAM
     builder = InlineKeyboardBuilder()
     for s in songs:
         sid = hashlib.md5(s['url'].encode()).hexdigest()[:8]
@@ -412,17 +406,18 @@ async def similar_songs(call: CallbackQuery):
         return
     
     result = f"🎵 <b>{info['search'][:40]}</b>\n\n"
-    for s in songs[:10]:
+    for i, s in enumerate(songs[:10], 1):
         if s['artist']:
-            result += f"{s['num']}. {s['artist']} — {s['title'][:35]}\n   ⏱ {s['duration']}\n\n"
+            result += f"{i}. {s['artist']} — {s['title'][:35]}\n   ⏱ {s['duration']}\n\n"
         else:
-            result += f"{s['num']}. {s['title'][:40]}\n   ⏱ {s['duration']}\n\n"
+            result += f"{i}. {s['title'][:40]}\n   ⏱ {s['duration']}\n\n"
     
+    # TUGMALAR FAQAT RAQAM - oxshash qushiqlar uchun ham
     builder = InlineKeyboardBuilder()
-    for s in songs[:10]:
+    for i, s in enumerate(songs[:10], 1):
         sid = hashlib.md5(s['url'].encode()).hexdigest()[:8]
         temp_data[sid] = SongData(id=sid, url=s['url'], title=s['title'], duration=s['duration'], artist=s['artist'])
-        builder.button(text=f"{s['num']}", callback_data=f"dl_{sid}")
+        builder.button(text=f"{i}", callback_data=f"dl_{sid}")
     builder.adjust(5)
     
     await call.message.answer(
@@ -465,8 +460,8 @@ async def download_song(call: CallbackQuery):
         await call.message.answer(f"❌ {title[:100]}")
 
 @dp.errors()
-async def errors(e, ex):
-    logging.error(f"Xato: {ex}")
+async def errors_handler(event, exception):
+    logging.error(f"Xatolik: {exception}")
     return True
 
 # =================== KEEP-ALIVE ===================
