@@ -42,7 +42,7 @@ class Config:
     TEMP_PATH = Path("temp_audio")
     MAX_FILE_SIZE = 50 * 1024 * 1024
     KEEP_ALIVE_PORT = int(os.getenv("PORT", "8080"))
-    MAX_DURATION_SECONDS = 600  # 10 daqiqa (600 soniya)
+    MAX_DURATION_SECONDS = 600  # 10 daqiqa
 
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
@@ -57,43 +57,35 @@ class SongData:
     artist: str = ""
 
 # =================== COOKIE QO'LLAB-QUVVATLASH ===================
-COOKIES_PATH = Path("/app/cookies.txt")
-
 def get_cookie_file():
-    """Cookie faylni topish - 4 xil usul"""
-    
     if Path("cookies.txt").exists():
         print("✅ Local cookies.txt topildi")
-        return str(Path("cookies.txt"))
-    
-    if COOKIES_PATH.exists():
+        return "cookies.txt"
+    if Path("/app/cookies.txt").exists():
         print("✅ /app/cookies.txt topildi")
-        return str(COOKIES_PATH)
+        return "/app/cookies.txt"
     
     cookie_b64 = os.getenv("COOKIE_BASE64")
     if cookie_b64:
         try:
             cookie_content = base64.b64decode(cookie_b64).decode('utf-8')
-            cookie_path = Path("downloads") / "cookies.txt"
+            cookie_path = Config.DOWNLOADS_PATH / "cookies.txt"
             cookie_path.parent.mkdir(exist_ok=True)
             cookie_path.write_text(cookie_content)
-            print("✅ Cookie base64 dan yuklandi")
             return str(cookie_path)
-        except Exception as e:
-            print(f"⚠️ Base64 xato: {e}")
+        except:
+            pass
     
     cookie_env = os.getenv("COOKIE_CONTENT")
     if cookie_env:
         try:
-            cookie_path = Path("downloads") / "cookies.txt"
+            cookie_path = Config.DOWNLOADS_PATH / "cookies.txt"
             cookie_path.parent.mkdir(exist_ok=True)
             cookie_path.write_text(cookie_env)
-            print("✅ Cookie env dan yuklandi")
             return str(cookie_path)
-        except Exception as e:
-            print(f"⚠️ Env xato: {e}")
+        except:
+            pass
     
-    print("⚠️ Cookie topilmadi")
     return None
 
 COOKIE_FILE = get_cookie_file()
@@ -144,7 +136,6 @@ bot_running = True
 
 # =================== YORDAMCHI FUNKSIYALAR ===================
 def get_platform(url: str) -> str:
-    url_lower = url.lower()
     patterns = {
         'youtube': ['youtube.com', 'youtu.be'],
         'instagram': ['instagram.com', 'instagr.am'],
@@ -152,7 +143,7 @@ def get_platform(url: str) -> str:
         'facebook': ['facebook.com', 'fb.watch', 'fb.com'],
     }
     for platform, domains in patterns.items():
-        if any(domain in url_lower for domain in domains):
+        if any(d in url.lower() for d in domains):
             return platform
     return 'other'
 
@@ -230,20 +221,18 @@ async def download_mp3(url: str, uid: int):
             return None, str(e)
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
-# =================== QO'SHIQ QIDIRISH (VAQT CHEKLOVI BILAN) ===================
-async def search_songs(query: str, limit: int = 10) -> List[dict]:
+async def search_songs(q: str, limit: int = 10) -> List[dict]:
     def run():
         try:
             opts = get_ydl_opts({'extract_flat': True})
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(f"ytsearch{limit*2}:{query}", download=False)
+                info = ydl.extract_info(f"ytsearch{limit*2}:{q}", download=False)
                 songs = []
-                for i, item in enumerate(info.get('entries', []), 1):
+                for item in info.get('entries', []):
                     if item and item.get('id'):
                         dur = item.get('duration', 0)
-                        # FAQAT 10 daqiqagacha (600 soniya) bo'lgan qo'shiqlar
                         if dur and dur > Config.MAX_DURATION_SECONDS:
-                            continue  # 10 daqiqadan uzunlarni o'tkazib yuborish
+                            continue
                         if len(songs) >= limit:
                             break
                         a, t = clean_title(item.get('title', ''))
@@ -253,13 +242,53 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
                             'artist': a,
                             'duration': format_duration(dur),
                             'url': f"https://youtube.com/watch?v={item['id']}",
-                            'full_title': t,
                         })
                 return songs
         except Exception as e:
             print(f"Qidiruv xatosi: {e}")
             return []
     return await asyncio.get_event_loop().run_in_executor(pool, run)
+
+# =================== SHAZAM AUDIO ANIQLASH ===================
+async def identify_audio_from_video(video_path: str) -> Optional[dict]:
+    if not SHAZAM_AVAILABLE or not shazam:
+        return None
+    
+    try:
+        audio_path = Config.TEMP_PATH / f"shazam_{int(time.time())}.mp3"
+        
+        cmd = [
+            'ffmpeg', '-i', video_path,
+            '-ss', '8', '-t', '12',
+            '-ac', '1', '-ar', '16000',
+            '-q:a', '2', '-map', 'a',
+            str(audio_path), '-y'
+        ]
+        
+        subprocess.run(cmd, capture_output=True, timeout=30)
+        
+        if not audio_path.exists() or audio_path.stat().st_size < 5000:
+            if audio_path.exists():
+                audio_path.unlink()
+            return None
+        
+        result = await shazam.recognize(str(audio_path))
+        audio_path.unlink()
+        
+        if result and 'track' in result:
+            track = result['track']
+            title = track.get('title', '')
+            artist = track.get('subtitle', '')
+            if title or artist:
+                return {
+                    'title': title,
+                    'artist': artist,
+                    'full_title': f"{artist} - {title}".strip('- ')
+                }
+        return None
+    except Exception as e:
+        logging.error(f"Shazam xatosi: {e}")
+        return None
 
 # =================== HANDLERS ===================
 @dp.message(CommandStart())
@@ -268,7 +297,7 @@ async def start(m: Message):
         "🎵 <b>Zurnavolar Bot</b>\n\n"
         "📥 Link yuboring (YouTube|Instagram|TikTok|Facebook)\n"
         "🔍 Qo'shiq nomi yozing\n"
-        "⏱️ Faqat 10 daqiqagacha bo'lgan qo'shiqlar\n\n"
+        "⏱️ Faqat 10 daqiqagacha\n\n"
         "@zurnavolarbot"
     )
 
@@ -278,7 +307,6 @@ async def help_cmd(m: Message):
         "📖 <b>Yordam</b>\n\n"
         "🎯 YouTube/Instagram/TikTok/Facebook linki\n"
         "🔍 Qo'shiq nomi yozing\n"
-        "⏱️ Maksimal davomiylik: 10 daqiqa\n"
         "🎵 MP3: 192kbps\n\n"
         "@zurnavolarbot"
     )
@@ -308,17 +336,26 @@ async def process_url(m: Message, url: str):
         return
     
     if os.path.getsize(fn) > Config.MAX_FILE_SIZE:
-        await m.answer(f"❌ Juda katta")
+        await m.answer("❌ Juda katta")
         os.remove(fn)
         return
     
     hid = hashlib.md5(url.encode()).hexdigest()[:8]
     a, t = clean_title(title)
     
+    identified = None
+    if plat in ['instagram', 'tiktok', 'facebook']:
+        det = await m.answer("🎵 Aniqlanmoqda...")
+        identified = await identify_audio_from_video(fn)
+        await det.delete()
+    
     video_cache[hid] = {'url': url, 'title': title, 'artist': a, 'search': title}
     
     emoji = {'youtube':'🎬', 'instagram':'📸', 'tiktok':'🎵', 'facebook':'📘'}
-    cap = f"{emoji.get(plat, '📹')} <b>{t}</b>  {format_duration(dur)}\n❤️ @zurnavolarbot"
+    cap = f"{emoji.get(plat, '📹')} <b>{t}</b>  {format_duration(dur)}"
+    if identified:
+        cap += f"\n🎯 {identified['full_title'][:40]}"
+    cap += f"\n❤️ @zurnavolarbot"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{hid}")],
@@ -436,7 +473,6 @@ async def keep_alive():
         finally:
             w.close()
     server = await asyncio.start_server(h, '0.0.0.0', Config.KEEP_ALIVE_PORT, reuse_address=True)
-    print(f"🟢 Keep-Alive: {Config.KEEP_ALIVE_PORT}")
     async with server:
         await server.serve_forever()
 
@@ -457,7 +493,6 @@ async def main():
     
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook tozalandi")
     except:
         pass
     
@@ -468,8 +503,7 @@ async def main():
         print("=" * 45)
         print(f"🎵 Zurnavolar: @{me.username}")
         print(f"🍪 Cookie: {'✅' if COOKIE_FILE else '❌'}")
-        print(f"🎬 FFmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}")
-        print(f"⏱️ Maksimal vaqt: {Config.MAX_DURATION_SECONDS//60} daqiqa")
+        print(f"🎤 Shazam: {'✅' if SHAZAM_AVAILABLE else '❌'}")
         print("=" * 45)
     except:
         pass
