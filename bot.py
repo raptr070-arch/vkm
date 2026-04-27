@@ -48,6 +48,16 @@ class Config:
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
 
+# =================== DATA MODELS (ISHLATISHDAN OLDIN E'LON) ===================
+@dataclass
+class SongData:
+    id: str
+    url: str
+    title: str
+    duration: str = "0:00"
+    artist: str = ""
+    platform: str = 'youtube'
+
 # =================== INIT ===================
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True)
 Config.TEMP_PATH.mkdir(exist_ok=True)
@@ -65,15 +75,6 @@ temp_data: Dict[str, SongData] = {}
 video_cache: Dict[str, dict] = {}
 shazam = Shazam() if SHAZAM_AVAILABLE else None
 bot_running = True
-
-@dataclass
-class SongData:
-    id: str
-    url: str
-    title: str
-    duration: str = "0:00"
-    artist: str = ""
-    platform: str = 'youtube'
 
 # =================== YORDAMCHI ===================
 def get_platform(url: str) -> str:
@@ -313,7 +314,7 @@ async def process_url(message: Message, url: str):
         cap += f"\n🎯 {identified['full_title'][:40]}"
     cap += "\n\n❤️ @zurnavolarbot"
     
-    # TUZATILGAN TUGMALAR - callback_data to'g'ri formatda
+    # TUGMALAR
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{hid}")],
         [InlineKeyboardButton(text="🔍 Oxshash", callback_data=f"sim_{hid}")]
@@ -412,7 +413,7 @@ async def similar_songs(call: CallbackQuery):
         else:
             result += f"{i}. {s['title'][:40]}\n   ⏱ {s['duration']}\n\n"
     
-    # TUGMALAR FAQAT RAQAM - oxshash qushiqlar uchun ham
+    # TUGMALAR FAQAT RAQAM
     builder = InlineKeyboardBuilder()
     for i, s in enumerate(songs[:10], 1):
         sid = hashlib.md5(s['url'].encode()).hexdigest()[:8]
