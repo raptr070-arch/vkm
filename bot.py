@@ -29,7 +29,7 @@ import aiohttp
 # ShazamIO
 try:
     from shazamio import Shazam
-    SHAZAM_AVAILABLE = True
+    SHAZAM_AVAILABLE = False  # Hozircha o'chirilgan, dependency conflict uchun
 except ImportError:
     SHAZAM_AVAILABLE = False
 
@@ -41,7 +41,7 @@ class Config:
     TEMP_PATH = Path("temp_audio")
     MAX_FILE_SIZE = 50 * 1024 * 1024
     KEEP_ALIVE_PORT = int(os.getenv("PORT", "8080"))
-    MAX_DURATION_SECONDS = 600
+    MAX_DURATION_SECONDS = 600  # 10 daqiqa
 
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
@@ -54,6 +54,7 @@ class SongData:
     duration: str = "0:00"
     artist: str = ""
 
+# =================== FAYLLARNI TAYYORLASH ===================
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True)
 Config.TEMP_PATH.mkdir(exist_ok=True)
 
@@ -67,12 +68,44 @@ video_cache: Dict[str, dict] = {}
 shazam = Shazam() if SHAZAM_AVAILABLE else None
 bot_running = True
 
-# =================== COOKIE ===================
+# =================== COOKIE QO'LLAB-QUVVATLASH (GitHub dan) ===================
 def get_cookie_file():
+    """Cookie faylni topish - GitHub repo dagi faylni birinchi navbatda tekshiradi"""
+    
+    # 1. GitHub repo dagi local fayl (eng ishonchli usul)
     if Path("cookies.txt").exists():
+        print("✅ Cookie fayl GitHub repo dan topildi")
         return "cookies.txt"
+    
+    # 2. Docker container ichidagi fayl
     if Path("/app/cookies.txt").exists():
+        print("✅ /app/cookies.txt topildi")
         return "/app/cookies.txt"
+    
+    # 3. Base64 environment variable
+    cookie_b64 = os.getenv("COOKIE_BASE64")
+    if cookie_b64:
+        try:
+            cookie_content = base64.b64decode(cookie_b64).decode('utf-8')
+            cookie_path = Config.DOWNLOADS_PATH / "cookies.txt"
+            cookie_path.write_text(cookie_content)
+            print("✅ Cookie base64 dan yuklandi")
+            return str(cookie_path)
+        except:
+            pass
+    
+    # 4. To'g'ridan-to'g'ri matn environment variable
+    cookie_env = os.getenv("COOKIE_CONTENT")
+    if cookie_env:
+        try:
+            cookie_path = Config.DOWNLOADS_PATH / "cookies.txt"
+            cookie_path.write_text(cookie_env)
+            print("✅ Cookie env dan yuklandi")
+            return str(cookie_path)
+        except:
+            pass
+    
+    print("⚠️ Cookie topilmadi! YouTube autentifikatsiyasi ishlamasligi mumkin")
     return None
 
 COOKIE_FILE = get_cookie_file()
@@ -87,16 +120,24 @@ def get_ydl_opts(extra=None):
         'max_sleep_interval': 10,
         'extractor_retries': 5,
         'noplaylist': True,
-        'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web'], 'skip': ['hls', 'dash']}}
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web'],
+                'skip': ['hls', 'dash'],
+            }
+        }
     }
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
         opts['cookiefile'] = COOKIE_FILE
+        print(f"🍪 Cookie ishlatilmoqda: {COOKIE_FILE}")
     if extra:
         opts.update(extra)
     return opts
 
-# =================== YORDAMCHI ===================
+# =================== YORDAMCHI FUNKSIYALAR ===================
 def get_platform(url: str) -> str:
     patterns = {
         'youtube': ['youtube.com', 'youtu.be'],
@@ -140,7 +181,7 @@ def clean_title(full: str):
         a = a[:27] + "..."
     return (a[:30], t[:60]) if a else ("", t[:60])
 
-# =================== YUKLASH ===================
+# =================== YUKLASH FUNKSIYALARI ===================
 async def download_video(url: str, uid: int):
     def run():
         try:
@@ -210,42 +251,7 @@ async def search_songs(q: str, limit: int = 10) -> List[dict]:
             return []
     return await asyncio.get_event_loop().run_in_executor(pool, run)
 
-# =================== SHAZAM ===================
-async def identify_audio_from_video(video_path: str) -> Optional[dict]:
-    if not SHAZAM_AVAILABLE or not shazam:
-        return None
-    try:
-        audio_path = Config.TEMP_PATH / f"shazam_{int(time.time())}.wav"
-        cmd = [
-            'ffmpeg', '-i', video_path,
-            '-ss', '10', '-t', '10',
-            '-ac', '1', '-ar', '22050',
-            '-f', 'wav', '-acodec', 'pcm_s16le',
-            '-y', str(audio_path)
-        ]
-        subprocess.run(cmd, capture_output=True, timeout=30)
-        if not audio_path.exists() or audio_path.stat().st_size < 10000:
-            if audio_path.exists():
-                audio_path.unlink()
-            return None
-        result = await asyncio.wait_for(shazam.recognize(str(audio_path)), timeout=20)
-        audio_path.unlink()
-        if result and 'track' in result:
-            track = result['track']
-            title = track.get('title', '')
-            artist = track.get('subtitle', '')
-            if title or artist:
-                return {
-                    'title': title,
-                    'artist': artist,
-                    'full_title': f"{artist} - {title}".strip('- ')
-                }
-        return None
-    except Exception as e:
-        logging.error(f"Shazam xatosi: {e}")
-        return None
-
-# =================== HANDLERS ===================
+# =================== ASOSIY HANDLERLAR ===================
 @dp.message(CommandStart())
 async def start(m: Message):
     await m.answer(
@@ -262,7 +268,8 @@ async def help_cmd(m: Message):
         "📖 <b>Yordam</b>\n\n"
         "🎯 YouTube/Instagram/TikTok/Facebook linki\n"
         "🔍 Qo'shiq nomi yozing\n"
-        "🎵 MP3: 192kbps\n\n"
+        "🎵 MP3: 192kbps\n"
+        "⏱️ Maksimal davomiylik: 10 daqiqa\n\n"
         "@zurnavolarbot"
     )
 
@@ -291,35 +298,27 @@ async def process_url(m: Message, url: str):
         return
     
     if os.path.getsize(fn) > Config.MAX_FILE_SIZE:
-        await m.answer("❌ Juda katta")
+        await m.answer("❌ Juda katta (max 50MB)")
         os.remove(fn)
         return
     
     hid = hashlib.md5(url.encode()).hexdigest()[:8]
     a, t = clean_title(title)
     
-    # Shazam audio aniqlash (faqat Instagram, TikTok, Facebook)
-    identified = None
-    if plat in ['instagram', 'tiktok', 'facebook']:
-        det = await m.answer("🎵 Shazam orqali aniqlanmoqda...")
-        identified = await identify_audio_from_video(fn)
-        await det.delete()
-    
-    search_term = identified['full_title'] if identified else title
-    video_cache[hid] = {'url': url, 'title': title, 'artist': a, 'search': search_term, 'identified': identified}
+    video_cache[hid] = {'url': url, 'title': title, 'artist': a, 'search': title}
     
     emoji = {'youtube':'🎬', 'instagram':'📸', 'tiktok':'🎵', 'facebook':'📘'}
-    cap = f"{emoji.get(plat, '📹')} <b>{t}</b>  {format_duration(dur)}"
-    if identified:
-        cap += f"\n🎯 Shazam: {identified['full_title'][:40]}"
-    cap += f"\n❤️ @zurnavolarbot"
+    cap = f"{emoji.get(plat, '📹')} <b>{t[:45]}</b>  {format_duration(dur)}\n❤️ @zurnavolarbot"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{hid}")],
         [InlineKeyboardButton(text="🔍 Oxshash", callback_data=f"sim_{hid}")]
     ])
     
-    await m.answer_video(FSInputFile(fn), caption=cap, reply_markup=kb)
+    try:
+        await m.answer_video(FSInputFile(fn), caption=cap, reply_markup=kb)
+    except:
+        await m.answer_video(FSInputFile(fn), caption=cap[:200])
     os.remove(fn)
 
 async def process_search(m: Message, q: str):
@@ -345,9 +344,12 @@ async def process_search(m: Message, q: str):
         builder.button(text=f"{s['number']}", callback_data=f"dl_{sid}")
     builder.adjust(5)
     
-    await m.answer(f"{result}\n👇 <b>Raqamni bosing</b>\n\n❤️ @zurnavolarbot", reply_markup=builder.as_markup())
+    await m.answer(
+        f"{result}\n👇 <b>Raqamni bosing</b>\n\n❤️ @zurnavolarbot",
+        reply_markup=builder.as_markup()
+    )
 
-# =================== CALLBACKS ===================
+# =================== CALLBACKLAR ===================
 @dp.callback_query(F.data.startswith("mp3_"))
 async def get_mp3(call: CallbackQuery):
     info = video_cache.get(call.data.replace("mp3_", ""))
@@ -355,12 +357,18 @@ async def get_mp3(call: CallbackQuery):
         await call.answer("❌", show_alert=True)
         return
     await call.answer("⏳")
-    msg = await call.message.answer("⏳ MP3...")
+    msg = await call.message.answer("⏳ MP3 tayyorlanmoqda...")
     fn, title = await download_mp3(info['url'], call.from_user.id)
     await msg.delete()
     if fn and os.path.exists(fn):
         a, t = clean_title(title)
-        await call.message.answer_audio(FSInputFile(fn), caption=f"🎵 {t}\n📦 {format_size(os.path.getsize(fn))}\n❤️ @zurnavolarbot", title=t[:60], performer=a or "Zurnavolar")
+        size = os.path.getsize(fn)
+        await call.message.answer_audio(
+            FSInputFile(fn),
+            caption=f"🎵 {t}\n📦 {format_size(size)}\n\n❤️ @zurnavolarbot",
+            title=t[:60],
+            performer=a[:30] or "Zurnavolar"
+        )
         os.remove(fn)
     else:
         await call.message.answer(f"❌ {title[:100]}")
@@ -372,15 +380,17 @@ async def similar(call: CallbackQuery):
         await call.answer("❌", show_alert=True)
         return
     await call.answer("🔍")
-    search_query = info.get('search', info.get('title', ''))
-    msg = await call.message.answer(f"🔍 {search_query[:35]}...")
-    songs = await search_songs(search_query, limit=10)
+    
+    search_q = info.get('search', info.get('title', ''))
+    msg = await call.message.answer(f"🔍 {search_q[:35]}...")
+    songs = await search_songs(search_q, limit=10)
     await msg.delete()
+    
     if not songs:
         await call.message.answer("❌ Oxshash topilmadi")
         return
     
-    result = f"🔍 {search_query[:35]}\n\n"
+    result = f"🔍 {search_q[:35]}\n\n"
     for i, s in enumerate(songs[:10], 1):
         if s['artist']:
             result += f"{i}. {s['artist']} - {s['title'][:45]} {s['duration']}\n"
@@ -394,7 +404,10 @@ async def similar(call: CallbackQuery):
         builder.button(text=f"{i}", callback_data=f"dl_{sid}")
     builder.adjust(5)
     
-    await call.message.answer(f"{result}\n━━━━━━━━━━━━━━━━\n🔍 {len(songs)} ta\n━━━━━━━━━━━━━━━━\n👇 Raqamni bosing\n❤️ @zurnavolarbot", reply_markup=builder.as_markup())
+    await call.message.answer(
+        f"{result}\n━━━━━━━━━━━━━━━━\n🔍 {len(songs)} ta\n━━━━━━━━━━━━━━━━\n👇 <b>Raqamni bosing</b>\n\n❤️ @zurnavolarbot",
+        reply_markup=builder.as_markup()
+    )
 
 @dp.callback_query(F.data.startswith("dl_"))
 async def download(call: CallbackQuery):
@@ -408,29 +421,36 @@ async def download(call: CallbackQuery):
     await msg.delete()
     if fn and os.path.exists(fn):
         a, t = clean_title(title)
-        await call.message.answer_audio(FSInputFile(fn), caption=f"🎵 {t}\n📦 {format_size(os.path.getsize(fn))}\n❤️ @zurnavolarbot", title=t[:60], performer=a or "Zurnavolar")
+        size = os.path.getsize(fn)
+        await call.message.answer_audio(
+            FSInputFile(fn),
+            caption=f"🎵 {t}\n📦 {format_size(size)}\n\n❤️ @zurnavolarbot",
+            title=t[:60],
+            performer=a[:30] or "Zurnavolar"
+        )
         os.remove(fn)
         temp_data.pop(call.data.replace("dl_", ""), None)
     else:
         await call.message.answer(f"❌ {title[:100]}")
 
 @dp.errors()
-async def err(e, ex):
-    logging.error(f"Xato: {ex}")
+async def errors_handler(event, exception):
+    if "message is not modified" not in str(exception).lower():
+        logging.error(f"Xatolik: {exception}")
     return True
 
 # =================== KEEP-ALIVE ===================
 async def keep_alive():
-    async def h(r, w):
+    async def han(d, w):
         try:
-            await r.read(100)
+            await d.read(100)
             w.write(b"HTTP/1.1 200 OK\r\n\r\nOK")
             await w.drain()
         except:
             pass
         finally:
             w.close()
-    server = await asyncio.start_server(h, '0.0.0.0', Config.KEEP_ALIVE_PORT, reuse_address=True)
+    server = await asyncio.start_server(han, '0.0.0.0', Config.KEEP_ALIVE_PORT, reuse_address=True)
     async with server:
         await server.serve_forever()
 
@@ -444,32 +464,44 @@ async def self_ping():
                 pass
             await asyncio.sleep(300)
 
+# =================== MAIN ===================
 async def main():
     global bot_running
     logging.basicConfig(level=logging.INFO)
+    
+    # Webhook tozalash - conflict xatosini hal qiladi
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook tozalandi")
     except:
         pass
+    
     await asyncio.sleep(1)
+    
     try:
         me = await bot.get_me()
-        print("="*45)
+        print("=" * 45)
         print(f"🎵 Zurnavolar: @{me.username}")
         print(f"🍪 Cookie: {'✅' if COOKIE_FILE else '❌'}")
-        print(f"🎤 Shazam: {'✅' if SHAZAM_AVAILABLE else '❌'}")
-        print("="*45)
+        print(f"🎬 FFmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}")
+        print("=" * 45)
     except:
         pass
+    
     asyncio.create_task(keep_alive())
     asyncio.create_task(self_ping())
+    
     while bot_running:
         try:
             print("🚀 Bot ishga tushdi")
             await dp.start_polling(bot, allowed_updates=['message', 'callback_query'], skip_updates=True)
         except Exception as e:
-            print(f"❌ {e} - 5s")
-            await asyncio.sleep(5)
+            if "Conflict" in str(e):
+                print("⚠️ Conflict - 10s")
+                await asyncio.sleep(10)
+            else:
+                print(f"❌ {e} - 5s")
+                await asyncio.sleep(5)
 
 def signal_handler(sig, frame):
     global bot_running
