@@ -1,0 +1,7 @@
+.env
+cookies.txt
+instagram_cookies.txt
+*.txt
+downloads/
+temp_audio/
+bot.log
