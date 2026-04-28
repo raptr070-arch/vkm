@@ -279,6 +279,11 @@ def get_ydl_opts(output_path: str, format_type: str = 'video', platform: str = '
         }
     }
 
+    # JS runtime qo'shish (agar Node.js o'rnatilgan bo'lsa)
+    if shutil.which('node'):
+        opts['js_runtimes'] = ['node']
+        logger.info("✅ Node.js JS runtime ishlatilmoqda")
+
     if format_type == 'video':
         opts.update({
             'format': 'best[height<=720][ext=mp4]/best[ext=mp4]',
@@ -300,7 +305,6 @@ def get_ydl_opts(output_path: str, format_type: str = 'video', platform: str = '
 # =================== AUDIO ANIQLASH ===================
 async def identify_audio_from_video(video_path: str) -> Optional[dict]:
     if not SHAZAM_AVAILABLE or not shazam:
-        logger.warning("Shazam mavjud emas")
         return None
     try:
         if not os.path.exists(video_path):
@@ -385,6 +389,9 @@ async def download_mp3(url: str, user_id: int):
             # 1-bosqich: Davomiylikni tekshirish
             check_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': False}
             check_opts.update(get_cookies_for_platform(platform))
+            # JS runtime qo'shish
+            if shutil.which('node'):
+                check_opts['js_runtimes'] = ['node']
 
             with yt_dlp.YoutubeDL(check_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -525,6 +532,7 @@ async def cmd_about(message: Message):
         cache_size = await video_cache.size()
         shazam_status = "✅ Faol" if SHAZAM_AVAILABLE else "❌ Ochirilgan"
         ffmpeg_status = "✅ Faol" if shutil.which('ffmpeg') else "❌ Ochirilgan"
+        node_status = "✅ Faol" if shutil.which('node') else "❌ Ochirilgan"
         yt_cookie = "✅" if os.path.exists(Config.COOKIES_PATH) else "❌"
         ig_cookie = "✅" if os.path.exists(Config.INSTAGRAM_COOKIES_PATH) else "❌"
         description = bot_info.description or "Qo'shiq va video yuklagich"
@@ -538,6 +546,7 @@ async def cmd_about(message: Message):
             "• Python 3.9+ | aiogram 3.x | yt-dlp\n"
             f"• Shazam: {shazam_status}\n"
             f"• FFmpeg: {ffmpeg_status}\n"
+            f"• Node.js: {node_status}\n"
             f"• YouTube Cookie: {yt_cookie}\n"
             f"• Instagram Cookie: {ig_cookie}\n\n"
             "📊 <b>Statistika:</b>\n"
@@ -653,7 +662,6 @@ async def process_url(message: Message, url: str, user_id: int):
                     pass
         else:
             error_text = str(full_title)[:200] if full_title else "Nomalum xatolik"
-            # Instagram login xatosi uchun maxsus xabar
             if "login required" in error_text.lower():
                 await message.answer(
                     "❌ <b>Instagram yuklashda xatolik!</b>\n\n"
@@ -710,17 +718,14 @@ async def process_search(message: Message, query: str, user_id: int):
                 duration=song['duration'], artist=song['artist'],
                 platform='youtube', duration_seconds=song.get('duration_seconds', 0)
             )
-            duration_emoji = "🔴 " if song.get('duration_seconds', 0) > Config.MAX_AUDIO_DURATION else ""
-            if song['artist']:
-                btn_text = f"{duration_emoji}{song['number']}. {song['artist'][:25]} — {song['title'][:25]}"
-            else:
-                btn_text = f"{duration_emoji}{song['number']}. {song['title'][:40]}"
+            # FAQAT RAQAM - qo'shiq nomisiz
+            btn_text = f"{song['number']}"
             builder.button(text=btn_text, callback_data=f"dl_{song_id}")
 
-        builder.adjust(1)
+        builder.adjust(5)  # 5 ta tugma bir qatorda
         await message.answer(
             f"🎵 <b>Qidiruv:</b> <code>{query}</code>\n\n{songs_text}"
-            f"👇 <b>Yuklash uchun tanlang:</b>\n"
+            f"👇 <b>Raqamni bosing:</b>\n"
             f"🔴 = 10 daqiqadan uzun\n\n❤️ @zurnavolarbot",
             reply_markup=builder.as_markup()
         )
@@ -867,9 +872,11 @@ async def similar_songs(call: CallbackQuery):
                 duration=song['duration'], artist=song['artist'],
                 platform='youtube', duration_seconds=song.get('duration_seconds', 0)
             )
-            builder.button(text=f"{idx}", callback_data=f"dl_{song_id}")
+            # FAQAT RAQAM - oxshash qo'shiqlar uchun
+            btn_text = f"{idx}"
+            builder.button(text=btn_text, callback_data=f"dl_{song_id}")
 
-        builder.adjust(5)
+        builder.adjust(5)  # 5 ta tugma bir qatorda
         await call.message.answer(
             f"🎵 <b>Oxshashlar:</b> {search_query[:50]}\n\n{songs_text}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n🔍 <b>{len(all_songs)} ta</b> | 🔴 10min+\n"
@@ -999,10 +1006,12 @@ async def main():
         bot_info = await bot.get_me()
         yt_cookie = "✅" if os.path.exists(Config.COOKIES_PATH) else "❌"
         ig_cookie = "✅" if os.path.exists(Config.INSTAGRAM_COOKIES_PATH) else "❌"
+        node_status = "✅" if shutil.which('node') else "❌"
 
         logger.info(f"✅ Bot: @{bot_info.username} | {bot_info.first_name}")
         logger.info(f"🎤 Shazam: {'✅' if SHAZAM_AVAILABLE else '❌'}")
         logger.info(f"🔧 FFmpeg: {'✅' if shutil.which('ffmpeg') else '❌'}")
+        logger.info(f"🟢 Node.js: {node_status}")
         logger.info(f"🍪 YouTube Cookie: {yt_cookie}")
         logger.info(f"📸 Instagram Cookie: {ig_cookie}")
         logger.info(f"⏱️ MP3 Cheklovi: 10 daqiqa")
