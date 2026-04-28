@@ -26,8 +26,12 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import aiohttp
 
-# ShazamIO - vaqtincha o'chirilgan (dependency conflict uchun)
-SHAZAM_AVAILABLE = False
+# ShazamIO
+try:
+    from shazamio import Shazam
+    SHAZAM_AVAILABLE = True
+except ImportError:
+    SHAZAM_AVAILABLE = False
 
 load_dotenv()
 
@@ -37,7 +41,7 @@ class Config:
     TEMP_PATH = Path("temp_audio")
     MAX_FILE_SIZE = 50 * 1024 * 1024
     KEEP_ALIVE_PORT = int(os.getenv("PORT", "8080"))
-    MAX_DURATION_SECONDS = 600  # 10 daqiqa
+    MAX_DURATION_SECONDS = 600
 
 if not Config.BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi!")
@@ -60,6 +64,7 @@ pool = ThreadPoolExecutor(max_workers=2)
 
 temp_data: Dict[str, SongData] = {}
 video_cache: Dict[str, dict] = {}
+shazam = Shazam() if SHAZAM_AVAILABLE else None
 bot_running = True
 
 # =================== COOKIE ===================
@@ -200,9 +205,45 @@ async def search_songs(q: str, limit: int = 10) -> List[dict]:
                         'url': f"https://youtube.com/watch?v={item['id']}",
                     })
                 return songs
-        except:
+        except Exception as e:
+            print(f"Qidiruv xatosi: {e}")
             return []
     return await asyncio.get_event_loop().run_in_executor(pool, run)
+
+# =================== SHAZAM ===================
+async def identify_audio_from_video(video_path: str) -> Optional[dict]:
+    if not SHAZAM_AVAILABLE or not shazam:
+        return None
+    try:
+        audio_path = Config.TEMP_PATH / f"shazam_{int(time.time())}.wav"
+        cmd = [
+            'ffmpeg', '-i', video_path,
+            '-ss', '10', '-t', '10',
+            '-ac', '1', '-ar', '22050',
+            '-f', 'wav', '-acodec', 'pcm_s16le',
+            '-y', str(audio_path)
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=30)
+        if not audio_path.exists() or audio_path.stat().st_size < 10000:
+            if audio_path.exists():
+                audio_path.unlink()
+            return None
+        result = await asyncio.wait_for(shazam.recognize(str(audio_path)), timeout=20)
+        audio_path.unlink()
+        if result and 'track' in result:
+            track = result['track']
+            title = track.get('title', '')
+            artist = track.get('subtitle', '')
+            if title or artist:
+                return {
+                    'title': title,
+                    'artist': artist,
+                    'full_title': f"{artist} - {title}".strip('- ')
+                }
+        return None
+    except Exception as e:
+        logging.error(f"Shazam xatosi: {e}")
+        return None
 
 # =================== HANDLERS ===================
 @dp.message(CommandStart())
@@ -217,7 +258,13 @@ async def start(m: Message):
 
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
-    await m.answer("📖 Yordam\n\n/start - Boshlash\n/help - Yordam\n\n@zurnavolarbot")
+    await m.answer(
+        "📖 <b>Yordam</b>\n\n"
+        "🎯 YouTube/Instagram/TikTok/Facebook linki\n"
+        "🔍 Qo'shiq nomi yozing\n"
+        "🎵 MP3: 192kbps\n\n"
+        "@zurnavolarbot"
+    )
 
 @dp.message(F.text)
 async def handle(m: Message):
@@ -235,7 +282,7 @@ async def process_url(m: Message, url: str):
         await m.answer("❌ Faqat YouTube|Instagram|TikTok|Facebook")
         return
     
-    msg = await m.answer("⏳ Yuklanmoqda...")
+    msg = await m.answer("⏳ Video yuklanmoqda...")
     fn, title, dur = await download_video(url, m.from_user.id)
     await msg.delete()
     
@@ -251,10 +298,21 @@ async def process_url(m: Message, url: str):
     hid = hashlib.md5(url.encode()).hexdigest()[:8]
     a, t = clean_title(title)
     
-    video_cache[hid] = {'url': url, 'title': title, 'artist': a, 'search': title}
+    # Shazam audio aniqlash (faqat Instagram, TikTok, Facebook)
+    identified = None
+    if plat in ['instagram', 'tiktok', 'facebook']:
+        det = await m.answer("🎵 Shazam orqali aniqlanmoqda...")
+        identified = await identify_audio_from_video(fn)
+        await det.delete()
+    
+    search_term = identified['full_title'] if identified else title
+    video_cache[hid] = {'url': url, 'title': title, 'artist': a, 'search': search_term, 'identified': identified}
     
     emoji = {'youtube':'🎬', 'instagram':'📸', 'tiktok':'🎵', 'facebook':'📘'}
-    cap = f"{emoji.get(plat, '📹')} <b>{t}</b>  {format_duration(dur)}\n❤️ @zurnavolarbot"
+    cap = f"{emoji.get(plat, '📹')} <b>{t}</b>  {format_duration(dur)}"
+    if identified:
+        cap += f"\n🎯 Shazam: {identified['full_title'][:40]}"
+    cap += f"\n❤️ @zurnavolarbot"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{hid}")],
@@ -314,17 +372,15 @@ async def similar(call: CallbackQuery):
         await call.answer("❌", show_alert=True)
         return
     await call.answer("🔍")
-    
-    search_q = info.get('search', info.get('title', ''))
-    msg = await call.message.answer(f"🔍 {search_q[:35]}...")
-    songs = await search_songs(search_q, limit=10)
+    search_query = info.get('search', info.get('title', ''))
+    msg = await call.message.answer(f"🔍 {search_query[:35]}...")
+    songs = await search_songs(search_query, limit=10)
     await msg.delete()
-    
     if not songs:
         await call.message.answer("❌ Oxshash topilmadi")
         return
     
-    result = f"🔍 {search_q[:35]}\n\n"
+    result = f"🔍 {search_query[:35]}\n\n"
     for i, s in enumerate(songs[:10], 1):
         if s['artist']:
             result += f"{i}. {s['artist']} - {s['title'][:45]} {s['duration']}\n"
@@ -338,7 +394,7 @@ async def similar(call: CallbackQuery):
         builder.button(text=f"{i}", callback_data=f"dl_{sid}")
     builder.adjust(5)
     
-    await call.message.answer(f"{result}\n━━━━━━━━━━━━━━━━\n🔍 {len(songs)} ta\n━━━━━━━━━━━━━━━━\n👇 <b>Raqamni bosing</b>\n\n❤️ @zurnavolarbot", reply_markup=builder.as_markup())
+    await call.message.answer(f"{result}\n━━━━━━━━━━━━━━━━\n🔍 {len(songs)} ta\n━━━━━━━━━━━━━━━━\n👇 Raqamni bosing\n❤️ @zurnavolarbot", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("dl_"))
 async def download(call: CallbackQuery):
@@ -388,43 +444,32 @@ async def self_ping():
                 pass
             await asyncio.sleep(300)
 
-# =================== MAIN ===================
 async def main():
     global bot_running
     logging.basicConfig(level=logging.INFO)
-    
-    # Webhook tozalash - MUHIM!
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook tozalandi")
     except:
         pass
-    
     await asyncio.sleep(1)
-    
     try:
         me = await bot.get_me()
-        print("=" * 45)
+        print("="*45)
         print(f"🎵 Zurnavolar: @{me.username}")
         print(f"🍪 Cookie: {'✅' if COOKIE_FILE else '❌'}")
-        print("=" * 45)
+        print(f"🎤 Shazam: {'✅' if SHAZAM_AVAILABLE else '❌'}")
+        print("="*45)
     except:
         pass
-    
     asyncio.create_task(keep_alive())
     asyncio.create_task(self_ping())
-    
     while bot_running:
         try:
             print("🚀 Bot ishga tushdi")
             await dp.start_polling(bot, allowed_updates=['message', 'callback_query'], skip_updates=True)
         except Exception as e:
-            if "Conflict" in str(e):
-                print("⚠️ Conflict - 10s")
-                await asyncio.sleep(10)
-            else:
-                print(f"❌ {e} - 5s")
-                await asyncio.sleep(5)
+            print(f"❌ {e} - 5s")
+            await asyncio.sleep(5)
 
 def signal_handler(sig, frame):
     global bot_running
