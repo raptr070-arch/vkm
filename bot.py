@@ -62,6 +62,7 @@ class Config:
     MAX_WORKERS = int(os.getenv("MAX_WORKERS", 5))
     SOCKET_TIMEOUT = int(os.getenv("SOCKET_TIMEOUT", 30))
     SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", 60))
+    MAX_AUDIO_DURATION = 600  # 10 daqiqa (soniyalarda)
 
 if not Config.BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable topilmadi!")
@@ -69,24 +70,10 @@ if not Config.BOT_TOKEN:
 # =================== DEPENDENCIES CHECK ===================
 def check_dependencies():
     """Barcha kerakli dependencylarni tekshirish"""
-    dependencies = {
-        'ffmpeg': 'FFmpeg',
-        'yt-dlp': 'yt-dlp (pip install yt-dlp)',
-    }
-
     missing = []
 
-    # FFmpeg tekshirish
     if not shutil.which('ffmpeg'):
         missing.append('ffmpeg')
-
-    for dep, name in dependencies.items():
-        if dep == 'ffmpeg':
-            continue
-        try:
-            __import__(dep.replace('-', '_'))
-        except ImportError:
-            missing.append(dep)
 
     if missing:
         logger.warning(f"⚠️ O'rnatilmagan: {', '.join(missing)}")
@@ -124,7 +111,6 @@ class ExpiringCache:
             return None
 
     async def _cleanup(self):
-        """Vaqti tugagan itemlarni o'chirish"""
         expired_keys = [
             k for k, v in self.cache.items()
             if datetime.now() - v['timestamp'] > timedelta(seconds=self.max_age)
@@ -167,6 +153,7 @@ class SongData:
     duration: str = "0:00"
     artist: str = ""
     platform: str = 'youtube'
+    duration_seconds: int = 0
 
 # =================== INITIALIZATION ===================
 Config.DOWNLOADS_PATH.mkdir(exist_ok=True, parents=True)
@@ -174,7 +161,6 @@ Config.TEMP_PATH.mkdir(exist_ok=True, parents=True)
 
 logger.info("📁 Papkalar tayyorlandi")
 
-# Cookie faylni yaratish
 create_cookies_file()
 
 session = AiohttpSession(timeout=Config.SESSION_TIMEOUT)
@@ -198,7 +184,6 @@ logger.info("🎵 Bot komponentlari yuklandi")
 
 # =================== YORDAMCHI FUNKSIYALAR ===================
 def get_platform(url: str) -> str:
-    """URL platformasini aniqlash"""
     url_lower = url.lower()
     patterns = {
         'youtube': ['youtube.com', 'youtu.be', 'm.youtube.com'],
@@ -212,7 +197,6 @@ def get_platform(url: str) -> str:
     return 'other'
 
 def format_duration(seconds):
-    """Vaqtni MM:SS formatiga o'tkazish"""
     if not seconds or seconds == 0:
         return "0:00"
     try:
@@ -228,7 +212,6 @@ def format_duration(seconds):
         return "0:00"
 
 def format_size(bytes_size: int) -> str:
-    """Fayl hajmini o'qilgan formatga o'tkazish"""
     if bytes_size is None or bytes_size == 0:
         return "0 B"
 
@@ -239,11 +222,9 @@ def format_size(bytes_size: int) -> str:
     return f"{bytes_size:.1f} TB"
 
 def extract_artist_title(full_title: str) -> tuple:
-    """Sarlavhadan artist va sharkni ajratish"""
     if not full_title:
         return "", ""
 
-    # Artist va sharkni ajratish
     if ' - ' in full_title:
         parts = full_title.split(' - ', 1)
         artist = parts[0].strip()
@@ -256,7 +237,6 @@ def extract_artist_title(full_title: str) -> tuple:
         artist = ""
         title = full_title.strip()
 
-    # Ortiqcha informatsiyani olib tashlash
     clean_title = title
     clean_title = re.sub(r'\(.*?\)', '', clean_title)
     clean_title = re.sub(r'\[.*?\]', '', clean_title)
@@ -288,7 +268,6 @@ def extract_artist_title(full_title: str) -> tuple:
     return clean_artist, clean_title
 
 def get_cookies_opts() -> dict:
-    """Cookie options'ni qaytarish"""
     opts = {}
     if os.path.exists(Config.COOKIES_PATH):
         try:
@@ -301,7 +280,6 @@ def get_cookies_opts() -> dict:
     return opts
 
 def get_ydl_opts(output_path: str, format_type: str = 'video') -> dict:
-    """YoutubeDL options'ni qaytarish"""
     opts = {
         'outtmpl': output_path,
         'quiet': False,
@@ -333,7 +311,6 @@ def get_ydl_opts(output_path: str, format_type: str = 'video') -> dict:
 
 # =================== AUDIO ANIQLASH ===================
 async def identify_audio_from_video(video_path: str) -> Optional[dict]:
-    """Shazam yordamida audio'ni aniqlash"""
     if not SHAZAM_AVAILABLE or not shazam:
         logger.warning("Shazam mavjud emas")
         return None
@@ -399,7 +376,6 @@ async def identify_audio_from_video(video_path: str) -> Optional[dict]:
 
 # =================== VIDEO YUKLASH ===================
 async def download_video(url: str, user_id: int):
-    """YouTube, Instagram, TikTok, Facebook dan video yuklash"""
     def run():
         try:
             output_path = str(Config.DOWNLOADS_PATH / f"video_{user_id}_{int(time.time())}_%(title)s.%(ext)s")
@@ -429,11 +405,28 @@ async def download_video(url: str, user_id: int):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(pool, run)
 
-# =================== MP3 YUKLASH ===================
+# =================== MP3 YUKLASH (10 DAQIQA CHEKLOVI BILAN) ===================
 async def download_mp3(url: str, user_id: int):
-    """Audio yuklash va MP3 ga o'tkazish"""
+    """Audio yuklash va MP3 ga o'tkazish (maksimal 10 daqiqa)"""
     def run():
         try:
+            # 1-bosqich: Avval video davomiyligini tekshirish (yuklamasdan)
+            check_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+            }
+            check_opts.update(get_cookies_opts())
+
+            with yt_dlp.YoutubeDL(check_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                duration = info.get('duration', 0)
+
+                # 10 daqiqadan (600 soniya) ko'p bo'lsa, yuklamaslik
+                if duration > Config.MAX_AUDIO_DURATION:
+                    return None, f"VIDEO_JUDA_UZUN:{duration}"
+
+            # 2-bosqich: Davomiylik mos bo'lsa, yuklash
             output_path = str(Config.DOWNLOADS_PATH / f"audio_{user_id}_{int(time.time())}_%(title)s.%(ext)s")
             opts = get_ydl_opts(output_path, 'audio')
 
@@ -453,7 +446,6 @@ async def download_mp3(url: str, user_id: int):
 
 # =================== QO'SHIQ QIDIRISH ===================
 async def search_songs(query: str, limit: int = 10) -> List[dict]:
-    """YouTube da qo'shiq qidirish"""
     def run():
         try:
             opts = get_ydl_opts('', 'video')
@@ -476,6 +468,7 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
                             full_title = item.get('title', 'Nomalum')
                             artist, title = extract_artist_title(full_title)
                             video_id = item.get('id', '')
+                            duration_seconds = item.get('duration', 0) or 0
 
                             if not video_id:
                                 continue
@@ -485,7 +478,8 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
                                 'title': title[:60],
                                 'artist': artist[:40],
                                 'full_title': full_title[:80],
-                                'duration': format_duration(item.get('duration', 0)),
+                                'duration': format_duration(duration_seconds),
+                                'duration_seconds': duration_seconds,
                                 'url': f"https://youtube.com/watch?v={video_id}",
                             })
 
@@ -500,17 +494,16 @@ async def search_songs(query: str, limit: int = 10) -> List[dict]:
 
 # =================== CLEANUP ===================
 async def cleanup_old_files():
-    """Eski fayllarni o'chirish (1 soatdan eski)"""
     while bot_running:
         try:
-            await asyncio.sleep(3600)  # 1 soat
+            await asyncio.sleep(3600)
 
             for directory in [Config.DOWNLOADS_PATH, Config.TEMP_PATH]:
                 if directory.exists():
                     for file_path in directory.glob('*'):
                         if file_path.is_file():
                             file_age = time.time() - file_path.stat().st_mtime
-                            if file_age > 3600:  # 1 soat
+                            if file_age > 3600:
                                 try:
                                     file_path.unlink()
                                     logger.info(f"Eski fayl o'chirildi: {file_path}")
@@ -522,7 +515,6 @@ async def cleanup_old_files():
 # =================== HANDLERS ===================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    """Start command"""
     try:
         user_name = message.from_user.first_name or "Foydalanuvchi"
         await message.answer(
@@ -534,6 +526,7 @@ async def cmd_start(message: Message):
             "Masalan: <code>yalla</code>, <code>shoxruxon</code>\n\n"
             "🎯 <b>Instagram/TikTok video</b> yuborsangiz,\n"
             "video ichidagi qo'shiqni avtomatik aniqlaydi! 🎤\n\n"
+            "⚠️ <b>MP3 cheklovi:</b> 10 daqiqagacha\n\n"
             "📞 <b>Buyruqlar:</b>\n"
             "/help - Yordam\n"
             "/about - Bot haqida\n\n"
@@ -545,7 +538,6 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    """Help command"""
     try:
         await message.answer(
             "📖 <b>Yordam</b>\n\n"
@@ -566,6 +558,7 @@ async def cmd_help(message: Message):
             "✅ Tez va ishonchli\n\n"
             "⚠️ <b>Cheklovlar:</b>\n"
             f"• Fayl maksimal hajmi: {format_size(Config.MAX_FILE_SIZE)}\n"
+            "• MP3: 10 daqiqagacha\n"
             "• Qidiruv: 10 ta natija\n"
             "• Cache: 1 soat\n\n"
             "❤️ @zurnavolarbot"
@@ -575,7 +568,6 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("about"))
 async def cmd_about(message: Message):
-    """About command"""
     try:
         bot_info = await bot.get_me()
         cache_size = await video_cache.size()
@@ -601,6 +593,9 @@ async def cmd_about(message: Message):
             "📊 <b>Statistika:</b>\n"
             f"• Cache hajmi: {cache_size} ta item\n"
             f"• Vaqti tugash: {Config.CACHE_EXPIRY} soniya\n\n"
+            "⚠️ <b>Cheklovlar:</b>\n"
+            f"• MP3: 10 daqiqagacha\n"
+            f"• Maksimal fayl: {format_size(Config.MAX_FILE_SIZE)}\n\n"
             "📧 <b>Bog'lanish:</b>\n"
             "@zurnavolarbot\n\n"
             "❤️ Botni yoqtirsangiz, do'stlaringizga ulashing!"
@@ -610,7 +605,6 @@ async def cmd_about(message: Message):
 
 @dp.message(F.text)
 async def handle_message(message: Message):
-    """Asosiy message handler"""
     try:
         text = message.text.strip()
         user_id = message.from_user.id
@@ -624,7 +618,6 @@ async def handle_message(message: Message):
         await message.answer("❌ Xatolik yuz berdi! Iltimos, qayta urinib ko'ring.")
 
 async def process_url(message: Message, url: str, user_id: int):
-    """URL'dan video/audio yuklash"""
     try:
         platform = get_platform(url)
 
@@ -692,16 +685,25 @@ async def process_url(message: Message, url: str, user_id: int):
                     'search_query': search_title,
                 })
 
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🎵 MP3 yuklash",
-                        callback_data=f"mp3_{url_hash}"
-                    )],
-                    [InlineKeyboardButton(
-                        text="🔍 Oxshashlar",
-                        callback_data=f"similar_{url_hash}"
-                    )]
-                ])
+                # Agar video 10 daqiqadan uzun bo'lsa, MP3 tugmasini ko'rsatmaslik
+                if duration <= Config.MAX_AUDIO_DURATION:
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="🎵 MP3 yuklash",
+                            callback_data=f"mp3_{url_hash}"
+                        )],
+                        [InlineKeyboardButton(
+                            text="🔍 Oxshashlar",
+                            callback_data=f"similar_{url_hash}"
+                        )]
+                    ])
+                else:
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="🔍 Oxshashlar",
+                            callback_data=f"similar_{url_hash}"
+                        )]
+                    ])
 
                 platform_emoji = {
                     'youtube': '🎬',
@@ -721,6 +723,14 @@ async def process_url(message: Message, url: str, user_id: int):
                     caption += (
                         f"\n\n🎯 <b>Aniqlangan qo'shiq:</b>\n"
                         f"{identified_song['full_title'][:80]}"
+                    )
+                if duration > Config.MAX_AUDIO_DURATION:
+                    minutes = duration // 60
+                    seconds = duration % 60
+                    caption += (
+                        f"\n\n⚠️ <b>MP3 yuklab bo'lmaydi!</b>\n"
+                        f"Davomiyligi: {minutes}:{seconds:02d}\n"
+                        f"Maksimal: 10:00"
                     )
                 caption += f"\n\n❤️ @zurnavolarbot"
 
@@ -749,7 +759,6 @@ async def process_url(message: Message, url: str, user_id: int):
         await message.answer("❌ URL'ni qayta tekshiring!")
 
 async def process_search(message: Message, query: str, user_id: int):
-    """Qo'shiq qidirish"""
     try:
         if len(query) < 2:
             await message.answer("❌ Iltimos, kamida 2 ta harf kiriting!")
@@ -774,17 +783,22 @@ async def process_search(message: Message, query: str, user_id: int):
 
         songs_text = ""
         for s in songs:
+            duration_str = s['duration']
+            # 10 daqiqadan uzun bo'lsa, belgilash
+            if s.get('duration_seconds', 0) > Config.MAX_AUDIO_DURATION:
+                duration_str = f"🔴 {s['duration']}"
+
             if s['artist']:
                 songs_text += (
                     f"<code>{s['number']}</code>. "
                     f"{s['artist']} — {s['title']}\n"
-                    f"   ⏱️ {s['duration']}\n\n"
+                    f"   ⏱️ {duration_str}\n\n"
                 )
             else:
                 songs_text += (
                     f"<code>{s['number']}</code>. "
                     f"{s['title']}\n"
-                    f"   ⏱️ {s['duration']}\n\n"
+                    f"   ⏱️ {duration_str}\n\n"
                 )
 
         builder = InlineKeyboardBuilder()
@@ -796,15 +810,21 @@ async def process_search(message: Message, query: str, user_id: int):
                 title=song['full_title'],
                 duration=song['duration'],
                 artist=song['artist'],
-                platform='youtube'
+                platform='youtube',
+                duration_seconds=song.get('duration_seconds', 0)
             )
+
+            duration_emoji = ""
+            if song.get('duration_seconds', 0) > Config.MAX_AUDIO_DURATION:
+                duration_emoji = "🔴 "
+
             if song['artist']:
                 btn_text = (
-                    f"{song['number']}. "
+                    f"{duration_emoji}{song['number']}. "
                     f"{song['artist'][:25]} — {song['title'][:25]}"
                 )
             else:
-                btn_text = f"{song['number']}. {song['title'][:40]}"
+                btn_text = f"{duration_emoji}{song['number']}. {song['title'][:40]}"
             builder.button(text=btn_text, callback_data=f"dl_{song_id}")
 
         builder.adjust(1)
@@ -812,7 +832,8 @@ async def process_search(message: Message, query: str, user_id: int):
         await message.answer(
             f"🎵 <b>Qidiruv natijasi:</b> <code>{query}</code>\n\n"
             f"{songs_text}"
-            f"👇 <b>Yuklab olish uchun tanlang:</b>\n\n"
+            f"👇 <b>Yuklab olish uchun tanlang:</b>\n"
+            f"🔴 = 10 daqiqadan uzun\n\n"
             f"❤️ @zurnavolarbot",
             reply_markup=builder.as_markup()
         )
@@ -822,13 +843,24 @@ async def process_search(message: Message, query: str, user_id: int):
 
 @dp.callback_query(F.data.startswith("mp3_"))
 async def mp3_from_video(call: CallbackQuery):
-    """Video'dan MP3 yuklash"""
     try:
         url_hash = call.data.replace("mp3_", "")
         video_info = await video_cache.get(url_hash)
 
         if not video_info:
             await call.answer("❌ Video ma'lumoti topilmadi!", show_alert=True)
+            return
+
+        # Davomiylikni tekshirish
+        duration = video_info.get('duration', 0)
+        if duration > Config.MAX_AUDIO_DURATION:
+            minutes = duration // 60
+            seconds = duration % 60
+            await call.answer(
+                f"❌ Video juda uzun! ({minutes}:{seconds:02d})\n"
+                f"Maksimal: 10:00",
+                show_alert=True
+            )
             return
 
         await call.answer("⏳ MP3 yuklanmoqda...")
@@ -872,18 +904,28 @@ async def mp3_from_video(call: CallbackQuery):
                 except:
                     pass
         else:
-            error_msg = str(title) if len(str(title)) > 10 else "Nomalum xatolik"
-            await call.message.answer(
-                f"❌ MP3 yuklab bo'lmadi!\n\n"
-                f"📝 <b>Sabab:</b> {error_msg[:100]}"
-            )
+            error_msg = str(title)
+            if error_msg.startswith("VIDEO_JUDA_UZUN:"):
+                dur = int(error_msg.split(":")[1])
+                minutes = dur // 60
+                seconds = dur % 60
+                await call.message.answer(
+                    f"❌ Video juda uzun!\n\n"
+                    f"⏱️ Davomiyligi: {minutes}:{seconds:02d}\n"
+                    f"📏 Maksimal: 10:00\n\n"
+                    f"💡 Iltimos, 10 daqiqadan qisqa video tanlang."
+                )
+            else:
+                await call.message.answer(
+                    f"❌ MP3 yuklab bo'lmadi!\n\n"
+                    f"📝 <b>Sabab:</b> {error_msg[:100]}"
+                )
     except Exception as e:
         logger.error(f"MP3 callback da xatolik: {e}")
         await call.answer("❌ Xatolik yuz berdi!", show_alert=True)
 
 @dp.callback_query(F.data.startswith("similar_"))
 async def similar_songs(call: CallbackQuery):
-    """Oxshash qo'shiqlarni qidirish"""
     try:
         url_hash = call.data.replace("similar_", "")
         video_info = await video_cache.get(url_hash)
@@ -910,7 +952,6 @@ async def similar_songs(call: CallbackQuery):
         all_songs = []
         seen_urls = set()
 
-        # Asosiy qidiruv
         if search_query:
             songs1 = await search_songs(search_query, limit=10)
             for s in songs1:
@@ -918,7 +959,6 @@ async def similar_songs(call: CallbackQuery):
                     all_songs.append(s)
                     seen_urls.add(s['url'])
 
-        # Cover va remix qidiruvi
         if song_title:
             for q in [f"{song_title} cover version", f"{song_title} remix"]:
                 songs = await search_songs(q, limit=5)
@@ -927,7 +967,6 @@ async def similar_songs(call: CallbackQuery):
                         all_songs.append(s)
                         seen_urls.add(s['url'])
 
-        # Artist qidiruvi
         if len(all_songs) < 5 and artist:
             songs = await search_songs(artist, limit=5)
             for s in songs:
@@ -947,17 +986,21 @@ async def similar_songs(call: CallbackQuery):
         display_songs = all_songs[:10]
         songs_text = ""
         for idx, s in enumerate(display_songs, 1):
+            duration_str = s['duration']
+            if s.get('duration_seconds', 0) > Config.MAX_AUDIO_DURATION:
+                duration_str = f"🔴 {s['duration']}"
+
             if s['artist']:
                 songs_text += (
                     f"\n<code>{idx}</code>. "
                     f"{s['artist']} — {s['title'][:50]}  "
-                    f"<code>{s['duration']}</code>"
+                    f"<code>{duration_str}</code>"
                 )
             else:
                 songs_text += (
                     f"\n<code>{idx}</code>. "
                     f"{s['title'][:50]}  "
-                    f"<code>{s['duration']}</code>"
+                    f"<code>{duration_str}</code>"
                 )
 
         builder = InlineKeyboardBuilder()
@@ -969,7 +1012,8 @@ async def similar_songs(call: CallbackQuery):
                 title=song['full_title'],
                 duration=song['duration'],
                 artist=song['artist'],
-                platform='youtube'
+                platform='youtube',
+                duration_seconds=song.get('duration_seconds', 0)
             )
             btn_text = f"{idx}"
             builder.button(text=btn_text, callback_data=f"dl_{song_id}")
@@ -981,6 +1025,7 @@ async def similar_songs(call: CallbackQuery):
             f"{songs_text}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔍 <b>Topildi:</b> {len(all_songs)} ta versiya\n"
+            f"🔴 = 10 daqiqadan uzun\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"👇 <b>Raqamni bosing:</b>\n\n"
             f"❤️ @zurnavolarbot",
@@ -992,13 +1037,23 @@ async def similar_songs(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("dl_"))
 async def download_selected(call: CallbackQuery):
-    """Tanlangan qo'shiqni yuklash"""
     try:
         song_id = call.data.replace("dl_", "")
         song_data = temp_data.get(song_id)
 
         if not song_data:
             await call.answer("❌ Ma'lumot topilmadi!", show_alert=True)
+            return
+
+        # 10 daqiqa cheklovi
+        if song_data.duration_seconds > Config.MAX_AUDIO_DURATION:
+            minutes = song_data.duration_seconds // 60
+            seconds = song_data.duration_seconds % 60
+            await call.answer(
+                f"❌ Qo'shiq juda uzun! ({minutes}:{seconds:02d})\n"
+                f"Maksimal: 10:00",
+                show_alert=True
+            )
             return
 
         await call.answer("⏳ MP3 yuklanmoqda...")
@@ -1038,25 +1093,34 @@ async def download_selected(call: CallbackQuery):
                 except:
                     pass
         else:
-            error_msg = str(title) if len(str(title)) > 10 else "Nomalum xatolik"
-            await call.message.answer(
-                f"❌ MP3 yuklab bo'lmadi!\n\n"
-                f"📝 <b>Sabab:</b> {error_msg[:100]}"
-            )
+            error_msg = str(title)
+            if error_msg.startswith("VIDEO_JUDA_UZUN:"):
+                dur = int(error_msg.split(":")[1])
+                minutes = dur // 60
+                seconds = dur % 60
+                await call.message.answer(
+                    f"❌ Qo'shiq juda uzun!\n\n"
+                    f"⏱️ Davomiyligi: {minutes}:{seconds:02d}\n"
+                    f"📏 Maksimal: 10:00\n\n"
+                    f"💡 Iltimos, qisqaroq qo'shiq tanlang."
+                )
+            else:
+                await call.message.answer(
+                    f"❌ MP3 yuklab bo'lmadi!\n\n"
+                    f"📝 <b>Sabab:</b> {error_msg[:100]}"
+                )
     except Exception as e:
         logger.error(f"Download callback da xatolik: {e}")
         await call.answer("❌ Xatolik yuz berdi!", show_alert=True)
 
 @dp.errors()
 async def errors_handler(event, exception):
-    """Global error handler"""
     if "message is not modified" not in str(exception).lower():
         logger.error(f"Bot xatosi: {exception}")
     return True
 
 # =================== KEEP-ALIVE SERVER ===================
 async def keep_alive_server():
-    """HTTP server - hosting platformalari uchun"""
     async def handle_client(reader, writer):
         try:
             await reader.read(8192)
@@ -1094,7 +1158,6 @@ async def keep_alive_server():
         logger.error(f"Keep-alive server ishga tushmadi: {e}")
 
 async def self_ping():
-    """Bot'ni o'zini ping qilish"""
     await asyncio.sleep(30)
     ping_url = f"http://127.0.0.1:{Config.KEEP_ALIVE_PORT}"
 
@@ -1113,7 +1176,6 @@ async def self_ping():
 
 # =================== MAIN ===================
 async def main():
-    """Main bot function"""
     global bot_running
 
     logger.info("=" * 60)
@@ -1140,12 +1202,12 @@ async def main():
         logger.info(f"📁 Downloads: {Config.DOWNLOADS_PATH}")
         logger.info(f"⚙️ Max Workers: {Config.MAX_WORKERS}")
         logger.info(f"🔌 Keep-Alive Port: {Config.KEEP_ALIVE_PORT}")
+        logger.info(f"⏱️ MP3 Cheklovi: 10 daqiqa")
     except Exception as e:
         logger.error(f"Bot ma'lumoti olishda xatolik: {e}")
 
     logger.info("=" * 60)
 
-    # Background tasks
     asyncio.create_task(keep_alive_server())
     asyncio.create_task(self_ping())
     asyncio.create_task(cleanup_old_files())
@@ -1165,7 +1227,6 @@ async def main():
                 await asyncio.sleep(10)
 
 def signal_handler(sig, frame):
-    """Graceful shutdown"""
     global bot_running
     logger.info("\n⏹️ Bot to'xtatilmoqda...")
     bot_running = False
