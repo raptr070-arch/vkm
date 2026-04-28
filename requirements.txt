@@ -1,5 +1,5 @@
-aiogram
-yt-dlp
-python-dotenv
-shazamio
-aiohttp
+aiogram==3.10.0
+yt-dlp==2025.2.19
+python-dotenv==1.0.1
+shazamio==0.8.1
+aiohttp==3.11.13
